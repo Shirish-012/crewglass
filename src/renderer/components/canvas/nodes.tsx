@@ -1,3 +1,4 @@
+import { formatUsd } from "@shared/pricing";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useShallow } from "zustand/react/shallow";
 import { useDeck } from "../../state/store";
@@ -22,12 +23,14 @@ function Handles() {
 
 export function AgentNode({ data, selected }: NodeProps) {
   const key = (data as NodeData).key;
-  const { a, checks, orchestratorPaused, inChat } = useDeck(useShallow((s) => ({ a: s.agents[key], checks: s.checks, orchestratorPaused: s.orchestratorPaused,
+  const { a, checks, orchestratorPaused, step, inChat } = useDeck(useShallow((s) => ({ a: s.agents[key], checks: s.checks, orchestratorPaused: s.orchestratorPaused,
     // A Claude Code chat open right now runs as this agent (Claude runs agents by name, so only the copy it uses).
-    inChat: !!s.agents[key] && s.agents[key].sameName?.usedByClaude !== false && s.sessions.some((x) => x.id !== "none" && x.runsAs === s.agents[key].name) })));
+    inChat: !!s.agents[key] && s.agents[key].sameName?.usedByClaude !== false && s.sessions.some((x) => x.id !== "none" && x.runsAs === s.agents[key].name),
+    // The pipeline step this agent is running right now, if any.
+    step: s.pipeline?.status === "running" ? s.pipeline.steps.find((x) => x.agent === s.agents[key]?.name && ["running", "checking", "fixing"].includes(x.status)) : undefined })));
   if (!a) return null;
   const orch = a.kind === "orchestrator";
-  const cls = ["node-card", orch && "orchestrator", selected && "selected", a.status === "running" && "running",
+  const cls = ["node-card", orch && "orchestrator", selected && "selected", (a.status === "running" || step) && "running",
     a.status === "waiting" && "waiting", a.status === "failed" && "failed", a.disabled && "disabled", inChat && "in-chat"].filter(Boolean).join(" ");
   const kindTag = orch ? (orchestratorPaused ? "Orchestrator · paused" : "Orchestrator") : a.kind === "agy" ? "agy agent" : a.kind === "builtin" ? (a.scope === "plugin" ? "Plugin · watch only" : a.scope === "project" ? "File missing" : "Built-in · watch only") : a.scope === "user" ? "All-projects agent" : "Subagent";
 
@@ -63,8 +66,14 @@ export function AgentNode({ data, selected }: NodeProps) {
         <span className="spacer" />
         {a.kind === "agy" && a.gemini
           ? <span title="Claude tokens for the relay + Gemini tokens (Google's quota) today">{formatTokens(a.tokens)} + {formatTokens(a.gemini.tokensToday)} Gemini</span>
-          : <span title="Tokens used by this agent today">{formatTokens(a.tokens)} tok</span>}
+          : <span title={`Today: ${formatTokens(a.tokens)} input + output tokens, ${formatUsd(a.usdToday ?? 0)} at Claude API prices`}>{a.usdToday ? `${formatUsd(a.usdToday)} · ` : ""}{formatTokens(a.tokens)} tok</span>}
       </div>
+      {step && (
+        <div className="live" title="Run pipeline">
+          <Icon name="play" size={12} />
+          <span className="truncate grow">Pipeline step {step.index + 1}: {step.status === "checking" ? "running checks" : step.status === "fixing" ? `fix round ${step.tries}/2` : step.lastTool ?? "working"}</span>
+        </div>
+      )}
       {a.liveNow && a.status === "running" && (
         <div className="live" title="What it's doing right now">
           <Icon name="sparkle" size={13} />

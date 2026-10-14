@@ -14,6 +14,8 @@ export interface StoredRow {
   source: SessionSource;
   durationMin: number;
   tokens: number;
+  /** API-equivalent dollars (rows saved before dollars were tracked have none). */
+  usd?: number;
   agents: string[];
   mcps: string[];
   failures: number;
@@ -32,7 +34,7 @@ function clean(r: unknown): StoredRow | null {
   return {
     id: o.id.slice(0, 100), startedAt: o.startedAt as number, lastAt: o.lastAt as number,
     source: SOURCES.has(String(o.source)) ? (o.source as SessionSource) : "terminal",
-    durationMin: num(o.durationMin) ?? 0, tokens: num(o.tokens) ?? 0, failures: num(o.failures) ?? 0,
+    durationMin: num(o.durationMin) ?? 0, tokens: num(o.tokens) ?? 0, ...(num(o.usd) !== null ? { usd: num(o.usd)! } : {}), failures: num(o.failures) ?? 0,
     agents: names(o.agents), mcps: names(o.mcps), models: names(o.models),
   };
 }
@@ -68,5 +70,5 @@ export function mergeHistory(stored: StoredRow[], live: StoredRow[], keepDays: n
   const byId = new Map(stored.map((r) => [r.id, r]));
   for (const r of live) byId.set(r.id, r);
   return [...byId.values()].filter((r) => now - r.lastAt < keepDays * DAY).sort((a, b) => b.lastAt - a.lastAt).slice(0, 500)
-    .map((r) => ({ id: r.id, started: label(r.startedAt), source: r.source, durationMin: r.durationMin, tokens: r.tokens, agents: r.agents, mcps: r.mcps, failures: r.failures, models: r.models }));
+    .map((r) => ({ id: r.id, started: label(r.startedAt), source: r.source, durationMin: r.durationMin, tokens: r.tokens, usd: r.usd, agents: r.agents, mcps: r.mcps, failures: r.failures, models: r.models }));
 }

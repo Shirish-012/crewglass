@@ -22,6 +22,8 @@ export interface Agent {
   model: string;
   effort?: Effort;
   maxTurns?: number;
+  /** Start without CLAUDE.md (Claude Code 2.1.271+): a smaller, cheaper start for self-contained roles. */
+  omitClaudeMd?: boolean;
   toolAccess: "inherit" | "connected";
   builtinTools: string[];
   keepPrivate: boolean;
@@ -39,6 +41,8 @@ export interface Agent {
   liveNow?: { action: string; model: string; effort?: Effort; tokens: number };
   /** When another agent with the same name exists, which one Claude actually uses. */
   sameName?: { usedByClaude: boolean; otherKey: string };
+  /** Today's API-equivalent dollars for this agent (its subagent runs, plus a chat running as it). */
+  usdToday?: number;
   /** Set when the model or effort actually used differs from what's configured (for the orchestrator: its chat's). */
   actualModel?: string;
   actualEffort?: Effort;
@@ -114,6 +118,9 @@ export interface Session {
   tokens: number;
   /** Of `tokens`, today's part. */
   tokensToday?: number;
+  /** API-equivalent dollars: the whole session (with subagents), and today's part. */
+  usd?: number;
+  usdToday?: number;
   /** Cache traffic, shown next to the tokens but not counted in them. */
   cache?: { write: number; read: number };
   runsAs?: string;
@@ -187,6 +194,7 @@ export interface HistoryRow {
   source: SessionSource;
   durationMin: number;
   tokens: number;
+  usd?: number;
   agents: string[];
   mcps: string[];
   failures: number;

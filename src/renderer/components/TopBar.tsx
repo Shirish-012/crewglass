@@ -1,3 +1,4 @@
+import { formatUsd } from "@shared/pricing";
 import { useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { actions, sessionTotals, useDeck } from "../state/store";
@@ -7,26 +8,68 @@ import { FOLDER_SUGGESTIONS } from "../mock/fixtures";
 import { pickFolder } from "../real/api";
 import { Icon } from "./ui";
 import { PrototypeControls } from "./PrototypeControls";
+import { AppearanceToggle } from "./Appearance";
 
-function Meter({ label, used, limit }: { label: string; used: number; limit: number }) {
+/** Spend against a limit, in API-equivalent dollars (tokens in the tooltip). */
+function Meter({ label, used, limit, tokens, onClick }: { label: string; used: number; limit: number; tokens: number; onClick: (e: React.MouseEvent) => void }) {
   const pct = Math.min(100, Math.round((used / limit) * 100));
   const tone = pct >= 100 ? "bad" : pct >= 80 ? "warn" : "";
   return (
-    <div className="meter" title={`${label}: ${used.toLocaleString()} of ${limit.toLocaleString()} tokens. Warnings at 80% and 100%; Claude is never stopped automatically.`}>
-      <div className="label"><span>{label}</span><span>{formatTokens(used)} / {formatTokens(limit)}</span></div>
+    <button className="meter meter-btn" onClick={onClick} aria-haspopup="dialog"
+      title={`${label}: ${formatUsd(used)} of ${formatUsd(limit)} at Claude API prices (${formatTokens(tokens)} input + output tokens). Click to change your limits.`}>
+      <div className="label"><span>{label}</span><span>{formatUsd(used)} / {formatUsd(limit)}</span></div>
       <div className={`track ${tone}`}><div className={`fill ${tone}`} style={{ width: `${pct}%` }} /></div>
+    </button>
+  );
+}
+
+/** Change both limits right from the top bar: type an amount, ±$5, or a quick pick. Saved at once. */
+function LimitsPopover({ at, onClose }: { at: { x: number; y: number }; onClose: () => void }) {
+  const limits = useDeck((s) => s.limits);
+  const [v, setV] = useState({ session: limits.session, day: limits.day });
+  const save = (next: { session: number; day: number }) => {
+    const clean = { session: Math.min(100_000, Math.max(1, Math.round(next.session * 100) / 100)), day: Math.min(100_000, Math.max(1, Math.round(next.day * 100) / 100)) };
+    setV(clean);
+    useDeck.setState({ limits: clean });
+    void window.crewglass?.updateSettings({ limits: clean });
+  };
+  const row = (key: "session" | "day", label: string, picks: number[]) => (
+    <div className="col" style={{ gap: 6 }}>
+      <label className="small"><b>{label}</b></label>
+      <div className="row" style={{ gap: 6 }}>
+        <button className="btn small" onClick={() => save({ ...v, [key]: v[key] - 5 })} aria-label={`${label}: $5 less`}>− $5</button>
+        <span className="muted">$</span>
+        <input className="input" type="number" min={1} step={5} style={{ width: 90 }} value={v[key]} aria-label={label}
+          onChange={(e) => setV({ ...v, [key]: Number(e.target.value) })} onBlur={() => save(v)} onKeyDown={(e) => e.key === "Enter" && save(v)} />
+        <button className="btn small" onClick={() => save({ ...v, [key]: v[key] + 5 })} aria-label={`${label}: $5 more`}>+ $5</button>
+      </div>
+      <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+        {picks.map((p) => <button key={p} className={`chip selectable ${v[key] === p ? "on" : ""}`} onClick={() => save({ ...v, [key]: p })}>${p}</button>)}
+      </div>
     </div>
+  );
+  return (
+    <>
+      <div style={{ position: "fixed", inset: 0, zIndex: 59 }} onClick={onClose} />
+      <div className="popover col" role="dialog" aria-label="Usage limits" style={{ left: at.x, top: at.y, width: 300, padding: 14, gap: 14 }}>
+        {row("session", "Per chat (session)", [10, 25, 50, 100, 1000])}
+        {row("day", "Per day, this folder", [25, 50, 100, 200, 500])}
+        <div className="muted small">API-equivalent dollars. Warning at 80%; with Live mode Claude is asked to wrap up at 95%. Nothing is ever blocked. Saved at once.</div>
+      </div>
+    </>
   );
 }
 
 export function TopBar() {
   const s = useDeck(useShallow((st) => ({
-    folder: st.folder, sessions: st.sessions, limits: st.limits, todayTokens: st.todayTokens, stopFlag: st.stopFlag,
+    folder: st.folder, sessions: st.sessions, limits: st.limits, todayTokens: st.todayTokens, todayUsd: st.todayUsd, stopFlag: st.stopFlag,
     inbox: st.inbox, lastBackup: st.lastBackup, liveMode: st.liveMode, mode: st.mode, suggestions: st.suggestions, readOnly: st.readOnly,
   })));
   const real = s.mode === "real";
   const suggestions = real ? s.suggestions : FOLDER_SUGGESTIONS;
   const totals = useDeck(useShallow((st) => sessionTotals(st)));
+  const [limitsAt, setLimitsAt] = useState<{ x: number; y: number } | null>(null);
+  const openLimits = (e: React.MouseEvent) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setLimitsAt(limitsAt ? null : { x: Math.max(8, r.left - 40), y: r.bottom + 6 }); };
   const status = useStatusLine();
   const localPending = usePendingFiles();
   const edits = useDeck((st) => st.summaries.length);
@@ -77,8 +120,9 @@ export function TopBar() {
 
       <div className="spacer" />
 
-      <Meter label={`Session · ctx ${totals.contextPct}%`} used={totals.session?.tokens ?? 0} limit={s.limits.session} />
-      <Meter label="Today" used={s.todayTokens} limit={s.limits.day} />
+      <Meter label={`Session · ctx ${totals.contextPct}%`} used={totals.session?.usd ?? 0} tokens={totals.session?.tokens ?? 0} limit={s.limits.session} onClick={openLimits} />
+      <Meter label="Today" used={s.todayUsd ?? 0} tokens={s.todayTokens} limit={s.limits.day} onClick={openLimits} />
+      {limitsAt && <LimitsPopover at={limitsAt} onClose={() => setLimitsAt(null)} />}
 
       {status.anyRunning && !s.stopFlag && !s.liveMode && real && (
         <button className="btn stop-btn" disabled title="Stop needs Live mode — turn it on in the panel on the right">
@@ -106,15 +150,30 @@ export function TopBar() {
       )}
       {s.stopFlag && <button className="btn" onClick={() => actions.resume()}><Icon name="play" size={14} /> Resume</button>}
 
+      <AppearanceToggle />
+      <button className="icon-btn" onClick={() => useDeck.setState({ settingsOpen: true })} title="Settings (⌘,)" aria-label="Settings"><Icon name="gear" size={17} /></button>
       {s.lastBackup && <button className="btn ghost small" onClick={() => actions.undoLastSave()} title="Restore the files from before your last save"><Icon name="undo" size={14} /> Undo last save</button>}
       <button className="icon-btn bell" onClick={() => useDeck.setState((st) => ({ inboxOpen: !st.inboxOpen }))} title="Attention inbox — things that need your decision" aria-label={`Attention inbox, ${open} open`}>
         <Icon name="bell" size={18} />
         {open > 0 && <span className="count">{open}</span>}
       </button>
+      <PipelineButton />
       <button className={`btn ${pending.length ? "primary" : ""}`} disabled={!pending.length}
         onClick={() => useDeck.setState({ reviewOpen: true })} title="Review every file change before anything is written (⌘S)">
         Review changes{pending.length ? ` (${pending.length})` : ""}
       </button>
     </header>
+  );
+}
+
+/** Run pipeline, or — while one runs — where it is ("Pipeline 2/3"). */
+function PipelineButton() {
+  const p = useDeck((st) => st.pipeline);
+  const active = p?.status === "running" ? p.steps.findIndex((x) => x.status !== "done") : -1;
+  return (
+    <button className={`btn ${active >= 0 ? "" : "ghost"}`} onClick={() => useDeck.setState({ runOpen: true })}
+      title="Run your steps in a guaranteed order, with checks in between">
+      <Icon name="play" size={13} /> {active >= 0 ? `Pipeline ${active + 1}/${p!.steps.length}` : "Run pipeline"}
+    </button>
   );
 }

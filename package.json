@@ -13,9 +13,15 @@
     "prototype": "vite build --config vite.prototype.config.ts && open prototype/dist/index.html",
     "prototype:build": "vite build --config vite.prototype.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "shot": "env -u ELECTRON_RUN_AS_NODE electron scripts/screenshot.mjs",
+    "smoke": "env -u ELECTRON_RUN_AS_NODE electron scripts/smoke.mjs",
     "build:hook": "mkdir -p out/bin && swiftc -O hook/main.swift -o out/bin/crewglass-hook && cp resources/agy-bridge/agy-bridge.mjs out/bin/agy-bridge.mjs",
-    "dist": "npm run build && env -u ELECTRON_RUN_AS_NODE electron-builder --mac --config electron-builder.yml",
-    "icon": "env -u ELECTRON_RUN_AS_NODE electron scripts/make-icon.mjs"
+    "dist": "npm run build && env -u ELECTRON_RUN_AS_NODE electron-builder --mac --config electron-builder.yml && node scripts/verify-dist.mjs",
+    "icon": "env -u ELECTRON_RUN_AS_NODE electron scripts/make-icon.mjs",
+    "check:network": "node scripts/check-no-network.mjs",
+    "check": "npm run typecheck && npm test && npm run check:network && node scripts/check-audit.mjs",
+    "dmg": "CREWGLASS_SHARE=1 npm run dist && node scripts/make-dmg.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.6",

@@ -96,6 +96,8 @@ interface Session {
   runs: Map<string, AgentRun>;
   /** Check results waiting to be told to the orchestrator (on its next Agent result or task notification). */
   orchNotes: string[];
+  /** Started by Crewglass's Run pipeline, which runs checks itself between steps. */
+  pipeline: boolean;
 }
 
 export interface AgentCheckState { state: CheckState; tries: number; label: string; at: number }
@@ -135,7 +137,7 @@ export class LiveEngine {
     let s = this.sessions.get(id);
     if (!s) {
       s = { id, status: "idle", stop: false, failures: null, paused: new Map(), runningAgents: new Map(), preToolCount: 0, lastAt: Date.now(),
-        grants: new Map(), depth: new Map(), directCalls: new Map(), pendingSpawn: null, callers: new Map(), pendingCaller: null, runs: new Map(), orchNotes: [] };
+        grants: new Map(), depth: new Map(), directCalls: new Map(), pendingSpawn: null, callers: new Map(), pendingCaller: null, runs: new Map(), orchNotes: [], pipeline: false };
       this.sessions.set(id, s);
     }
     return s;
@@ -360,7 +362,7 @@ export class LiveEngine {
     const run = s.runs.get(runKey);
     if (run && name) run.name = name;
     const caller = runKey !== "main" ? s.callers.get(runKey) : undefined;
-    const defs = name && this.checks && !s.stop ? this.checks.checksFor(name, caller) : [];
+    const defs = name && this.checks && !s.pipeline && !s.stop ? this.checks.checksFor(name, caller) : [];
     if (!name || !run || !defs.length || (!run.edited && run.tries === 0)) { if (runKey !== "main") { s.runs.delete(runKey); s.callers.delete(runKey); } return {}; }
     // Checks run where the agent worked (its git worktree, for example) — but only inside the watched folder.
     const cwd = m.cwd && this.inScope(m.cwd) ? m.cwd : null;
@@ -425,6 +427,9 @@ export class LiveEngine {
 
   /** A message for Claude in this session, delivered with its next step (additionalContext). */
   say(sessionId: string, text: string) { this.session(sessionId).note = { text: text.slice(0, 4000), delivered: false }; }
+
+  /** Runs started by Crewglass's pipeline: it runs their checks itself, between steps. */
+  markPipeline(sessionId: string) { this.session(sessionId).pipeline = true; }
 
   private approvalAllow = new Map<string, () => Answer>();
 

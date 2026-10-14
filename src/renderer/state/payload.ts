@@ -11,6 +11,6 @@ export function designPayload(): DesignPayload {
   const removedMcpScopes = Object.fromEntries(removedMcpKeys.map((k) => [k, s.saved.mcps[k].scope]));
   return {
     agents: Object.values(s.agents), mcps: Object.values(s.mcps), links: s.links, orchestratorKey: s.orchestratorKey,
-    orchestratorPaused: s.orchestratorPaused, checks: s.checks, deletedKeys, removedMcpKeys, removedMcpScopes,
+    orchestratorPaused: s.orchestratorPaused, checks: s.checks, handoff: s.handoff, deletedKeys, removedMcpKeys, removedMcpScopes,
   };
 }

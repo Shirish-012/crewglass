@@ -31,6 +31,7 @@ export function renderAgentFile(agent: Agent, extras: AgentFileExtras): string {
   const fm: Record<string, unknown> = { name: agent.name, description: agent.role, model: model?.alias ?? agent.model };
   if (agent.effort && model?.usesEffort) fm.effort = agent.effort;
   if (agent.maxTurns) fm.maxTurns = agent.maxTurns;
+  if (agent.omitClaudeMd) fm.omitClaudeMd = true;
   if (tools) fm.tools = tools.join(", ");
   return ["---", stringify(fm, { lineWidth: 0 }).trimEnd(), "---", "", agent.instructions.trim(), ""].join("\n");
 }

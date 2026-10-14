@@ -2,13 +2,16 @@
 // and the same command failing again and again. Pop-ups follow plan §8: only when you need to act or a
 // long task ended, never while Crewglass is in front, grouped by type with a 2-minute cooldown.
 
+import { formatUsd } from "@shared/pricing";
 import type { InboxItem } from "@shared/types";
-import { formatTokens } from "@shared/models";
 
 export interface AlertInput {
   folderName: string;
-  sessions: { id: string; name: string; status: string; tokens: number; contextPct: number; source?: string }[];
-  todayTokens: number;
+  /** `usd`: the session's API-equivalent dollars (with its subagents). */
+  sessions: { id: string; name: string; status: string; usd: number; contextPct: number; source?: string }[];
+  /** Today's API-equivalent dollars in this folder. */
+  todayUsd: number;
+  /** In US dollars. */
   limits: { session: number; day: number };
   failStreaks: { session: string; owner: string; command: string; count: number }[];
   /** agy calls in the current turn, per session (plan §7: warn after more than 3). */
@@ -77,12 +80,13 @@ export class Alerts {
       if (s.contextPct >= 85) this.add(`ctx:${s.id}`, { kind: "context", popup: false, title: `Context is ${s.contextPct}% full`, detail: `${s.name}: Claude will soon compact the conversation. Consider /compact or a fresh task.` }, notify);
       else if (s.contextPct < 70) this.fired.delete(`ctx:${s.id}`);
 
-      const pct = s.tokens / input.limits.session;
-      if (pct >= 0.8) this.add(`lim80:${s.id}`, { kind: "limit", popup: false, title: "This session is at 80% of its token limit", detail: `${formatTokens(s.tokens)} of ${formatTokens(input.limits.session)}. Claude keeps going; nothing is stopped automatically.` }, notify);
-      if (pct >= 1) this.add(`lim100:${s.id}`, { kind: "limit", popup: true, title: "This session reached its token limit", detail: `${formatTokens(s.tokens)} of ${formatTokens(input.limits.session)} in ${input.folderName}. Claude keeps going.` }, notify);
+      const pct = s.usd / input.limits.session;
+      const used = `${formatUsd(s.usd)} of ${formatUsd(input.limits.session)} (API-equivalent)`;
+      if (pct >= 0.8) this.add(`lim80:${s.id}`, { kind: "limit", popup: false, title: "This session is at 80% of its limit", detail: `${used}. Claude keeps going; nothing is stopped automatically.` }, notify);
+      if (pct >= 1) this.add(`lim100:${s.id}`, { kind: "limit", popup: true, title: "This session reached its limit", detail: `${used} in ${input.folderName}. Claude keeps going.` }, notify);
       // Past the limit: a quiet reminder at every further 25% (125%, 150%, …).
       for (let step = 125; pct * 100 >= step; step += 25) {
-        this.add(`lim${step}:${s.id}`, { kind: "limit", popup: false, title: `This session is at ${step}% of its token limit`, detail: `${formatTokens(s.tokens)} of ${formatTokens(input.limits.session)}. Claude keeps going.` }, notify);
+        this.add(`lim${step}:${s.id}`, { kind: "limit", popup: false, title: `This session is at ${step}% of its limit`, detail: `${used}. Claude keeps going.` }, notify);
       }
 
       // Claude finished a task: busy → IDLE. ("Waiting for your permission" isn't finished, and a Stop you pressed
@@ -102,11 +106,12 @@ export class Alerts {
     for (const id of [...this.busySince.keys()]) if (!input.sessions.some((x) => x.id === id)) this.busySince.delete(id); // ended
 
     const day = new Date().toDateString();
-    const dayPct = input.todayTokens / input.limits.day;
-    if (dayPct >= 0.8) this.add(`day80:${day}`, { kind: "limit", popup: false, title: "Today's usage in this folder is at 80%", detail: `${formatTokens(input.todayTokens)} of ${formatTokens(input.limits.day)}.` }, notify);
-    if (dayPct >= 1) this.add(`day100:${day}`, { kind: "limit", popup: true, title: "Today's token limit for this folder is reached", detail: `${formatTokens(input.todayTokens)} of ${formatTokens(input.limits.day)}. Claude keeps going.` }, notify);
+    const dayPct = input.todayUsd / input.limits.day;
+    const dayUsed = `${formatUsd(input.todayUsd)} of ${formatUsd(input.limits.day)} (API-equivalent)`;
+    if (dayPct >= 0.8) this.add(`day80:${day}`, { kind: "limit", popup: false, title: "Today's spend in this folder is at 80%", detail: `${dayUsed}.` }, notify);
+    if (dayPct >= 1) this.add(`day100:${day}`, { kind: "limit", popup: true, title: "Today's limit for this folder is reached", detail: `${dayUsed}. Claude keeps going.` }, notify);
     for (let step = 125; dayPct * 100 >= step; step += 25) {
-      this.add(`day${step}:${day}`, { kind: "limit", popup: false, title: `Today's usage in this folder is at ${step}% of its limit`, detail: `${formatTokens(input.todayTokens)} of ${formatTokens(input.limits.day)}. Claude keeps going.` }, notify);
+      this.add(`day${step}:${day}`, { kind: "limit", popup: false, title: `Today's spend in this folder is at ${step}% of its limit`, detail: `${dayUsed}. Claude keeps going.` }, notify);
     }
 
     // "Claude may be stuck": many failures in a short time. Nothing is paused; with Live mode you can step in.

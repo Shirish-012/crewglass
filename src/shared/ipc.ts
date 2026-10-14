@@ -2,7 +2,7 @@
 // The UI can only call the functions in DeckApi — nothing else from the operating system is exposed.
 
 import type {
-  ActivityEvent, Agent, Check, FormatIssue, HistoryRow, InboxItem, Link, McpScope, McpServer, ProcessRow, Session,
+  ActivityEvent, Agent, Check, Effort, FormatIssue, HistoryRow, InboxItem, Link, McpScope, McpServer, ProcessRow, Session,
 } from "./types";
 import type { SecretHit } from "./secretGuard";
 
@@ -14,6 +14,8 @@ export interface DesignPayload {
   orchestratorKey: string | null;
   orchestratorPaused: boolean;
   checks: Record<string, Check>;
+  /** /handoff and /pickup in .claude/commands/: true = add or update, false = remove ours, undefined = leave alone. */
+  handoff?: boolean;
   /** Agents you deleted (their files are removed; a backup is kept). */
   deletedKeys: string[];
   /** MCP servers you removed, and where each one was configured (it's no longer in `mcps`). */
@@ -52,6 +54,25 @@ export interface SavePlan {
 /** Pop-up types you can switch off in Settings (plan §8). */
 export type PopupKind = "permission" | "paused" | "approval" | "failed" | "finished" | "limit";
 
+/** What the Settings screen shows and changes. */
+export interface AppSettings {
+  launchAtLogin: boolean;
+  /** Launch at login only works in the installed app (not when run from the repo). */
+  canLaunchAtLogin: boolean;
+  popups: Record<PopupKind, boolean>;
+  permissionPopupSec: number;
+  notifyEveryFinish: boolean;
+  longTaskMin: number;
+  chatNotice: boolean;
+  statusLine: boolean;
+  breakerThreshold: number;
+  historyDays: number;
+  limits: { session: number; day: number };
+  sourceRepo: string;
+  dataFolder: string;
+  version: string;
+}
+
 /** What Uninstall will do (shown as a checklist before anything happens). */
 export interface UninstallPlan {
   hookFolders: string[];
@@ -61,6 +82,41 @@ export interface UninstallPlan {
 }
 
 export interface PlanCheck { agent: string; label: string; command: string; isNew: boolean }
+
+/** Run pipeline (plan §6.5): your steps in order. Read-only ("plan") by default; never "bypass". */
+export interface PipelineSpec {
+  task: string;
+  steps: { agent: string; effort?: Effort }[];
+  permissionMode: "plan" | "acceptEdits";
+  maxTurns: number;
+  stopOnFailure: boolean;
+}
+
+export interface StepProgress {
+  index: number;
+  agent: string;
+  status: "waiting" | "running" | "checking" | "fixing" | "done" | "failed" | "stopped";
+  tokens: number;
+  model: string | null;
+  lastTool: string | null;
+  /** What the step answered (memory only; shown live and copyable). */
+  output: string;
+  checks: { label: string; ok: boolean; tail?: string }[];
+  tries: number;
+  ms: number;
+  sessionId?: string;
+}
+
+export interface PipelineProgress {
+  id: string;
+  status: "running" | "done" | "failed" | "stopped";
+  task: string;
+  permissionMode: PipelineSpec["permissionMode"];
+  steps: StepProgress[];
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
 
 export interface SeriesPoint { t: number; byModel: Record<string, number>; toolCalls: number; failures: number }
 
@@ -79,6 +135,8 @@ export interface Snapshot {
   orchestratorKey: string | null;
   /** The team map names an orchestrator, but the `agent` setting is off (you paused it). */
   orchestratorPaused: boolean;
+  /** Crewglass's /handoff and /pickup commands are in this folder. */
+  handoff: boolean;
   activity: ActivityEvent[];
   series: SeriesPoint[];
   processes: ProcessRow[];
@@ -88,6 +146,9 @@ export interface Snapshot {
   todayTokens: number;
   /** Today's cache writes and reads in this folder (not counted in todayTokens). */
   todayCache: { write: number; read: number };
+  /** Today's API-equivalent dollars in this folder, in total and by model id. */
+  todayUsd: number;
+  todayUsdByModel: Record<string, number>;
   limits: { session: number; day: number };
   sourceRepo: string;
   claudeVersion: string | null;
@@ -129,9 +190,21 @@ export interface DeckApi {
   planSave(design: DesignPayload): Promise<SavePlan | { error: string }>;
   applySave(planId: string, confirmUser: boolean, confirmChecks?: boolean): Promise<{ ok: boolean; error?: string; written?: number }>;
   undoLastSave(): Promise<{ ok: boolean; error?: string }>;
+  getSettings(): Promise<AppSettings>;
+  updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** Picks Crewglass's own source folder (for the "Unknown fields" box). */
+  chooseSourceRepo(): Promise<AppSettings>;
+  /** Deletes Crewglass's stored data, keeping only what's needed to undo Live mode later. */
+  deleteAllData(): Promise<{ ok: boolean; error?: string }>;
+  /** Shows a Mac notification right away (and lets macOS ask for permission the first time). */
+  testNotification(): Promise<{ ok: boolean; error?: string }>;
   uninstallPlan(): Promise<UninstallPlan>;
   /** Removes Live mode from every folder, unregisters the agy bridge, deletes Crewglass's data, then quits. */
   uninstall(opts: { removeOrchestrator: boolean }): Promise<{ ok: boolean; error?: string }>;
+  /** Run pipeline: starts your steps in order (one pipeline at a time), or stops the running one. */
+  runPipeline(spec: PipelineSpec): Promise<{ ok: boolean; error?: string }>;
+  stopPipeline(): Promise<void>;
+  onPipeline(cb: (p: PipelineProgress) => void): () => void;
   /** Runs `agy models` (only when you click; agy may contact Google) and keeps the Gemini ids. */
   refreshAgyModels(): Promise<{ ok: boolean; models?: string[]; error?: string }>;
   dismissFormatIssues(): Promise<void>;

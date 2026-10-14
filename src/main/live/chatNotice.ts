@@ -31,15 +31,19 @@ export function chatNotice(opts: {
   startEffort: Effort | null;
   /** The saved team map, if any. */
   team: TeamMapData | null;
+  /** When .claude/handoff.md was last written (a note to continue from), if there is one. */
+  handoff?: string | null;
 }): string | null {
-  const { agentType, agent, startEffort, team } = opts;
+  const { agentType, agent, startEffort, team, handoff } = opts;
+  // Put first so it survives the length cap: it's what you most likely want to act on.
+  const pickup = handoff ? `handoff note from ${handoff} — /pickup to continue` : null;
   if (agentType) {
     const id = agent && agent.model !== "inherit" ? clean(agent.model) : "";
     const model = id ? (startEffort ? modelWithEffort(id, startEffort) : modelLabel(id)) : null;
-    return cap([`Crewglass: this chat runs as ${clean(agentType)}`, model && `starts on ${model}`, handsTo(team, (n) => n === agentType)]);
+    return cap([`Crewglass: this chat runs as ${clean(agentType)}`, pickup, model && `starts on ${model}`, handsTo(team, (n) => n === agentType)]);
   }
-  if (!team) return null; // no team saved here: nothing to say
+  if (!team) return pickup ? `Crewglass: ${pickup}` : null; // no team saved here
   // The chat leads (an older team map may still name a former orchestrator as the one handing work out).
   const fromChat = (n: string) => n === CHAT_NAME || n === team.orchestrator;
-  return cap(["Crewglass: this chat leads your team", handsTo(team, fromChat) || "no hand-offs drawn yet", "/workflow <task> runs the full team steps"]);
+  return cap(["Crewglass: this chat leads your team", pickup, handsTo(team, fromChat) || "no hand-offs drawn yet", "/workflow <task> runs the full team steps"]);
 }

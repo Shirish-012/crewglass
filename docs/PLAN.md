@@ -40,7 +40,7 @@ wiring, a sandboxed agy bridge and a Gemini model list.
 | D15 | Process | **Clickable prototype first**, then the real app |
 | D16 | Same-name agents | **Allowed.** Each card is tracked by its file, not its name, and shows which copy Claude will actually use |
 | D17 | Claude Code updates | A small **"Unknown fields detected"** box in the bottom-left shows what changed and where in *this* project's source code to fix it (§13.1) |
-| D18 | Subagent → subagent calls | **Allowed, with a clear `Reason:` and an approval.** Links you drew = approved by you in advance. Other calls: the **orchestrator** approves, and **you** approve costly ones (Opus at high effort or above, or agy / Gemini). No answer from you within 2 min → it goes to the orchestrator (§6.5) |
+| D18 | Subagent → subagent calls | **Allowed, with a clear `Reason:` and an approval.** Links you drew = approved by you in advance. Other calls: the **orchestrator** approves, and **you** approve costly ones (Opus at high effort or above, or agy / Gemini). No answer from you within 2 min → it goes to the orchestrator (§6.6) |
 | D21 | Limits in dollars | Per session and per day per folder, in **API-equivalent USD** (what the usage would cost at Claude API prices; cache reads and 5-minute / 1-hour cache writes at their own rates). Tokens (input + output) and cache stay visible. Defaults $25 / session, $50 / day. Spend counts only the chosen folder (D2) |
 | D22 | Near the limit | 80% inbox warning · **95%: the main chat is asked once a day, after a tool step, to finish its step and write `.claude/handoff.md`** · 100% pop-up. Nothing is ever blocked (a hard block at 100% was considered and declined) |
 | D23 | Extras for long work | **`/handoff` + `/pickup`** (optional per folder, through Review changes; the note is kept out of git; a usage-rules file tells Claude the 95% notice is from your own tool) · **status line** in Live mode folders (model · ctx · today $/limit · session $ · runs-as · handoff ✎) · **subagent templates**: new `explorer`, every role returns a short summary, self-contained read-only roles start without CLAUDE.md (`omitClaudeMd`) |
@@ -165,6 +165,11 @@ Crewglass reads the records Claude Code already keeps on your Mac. Through Claud
 
 ### 2.2 What makes it easy
 
+- **Guided first run** in 4 steps:
+  1. Choose a folder.
+  2. Turn on **Live mode**, with a diff shown ("needed for Stop, safeguards, checks and permission alerts").
+  3. Set **limits** (suggested from your last 30 days).
+  4. Pick a **team preset** or "Just watch".
 - **Drag a model** onto an agent to set its model and effort. Drop one on empty space to create an agent with that model. A Gemini model creates an agy agent.
 - **Right-click an agent:** Make orchestrator · Change model ▸ · Duplicate · Add check ▸ · Disable · Delete · Open file in VS Code.
 - **Plain words everywhere.** Every icon and line style has a tooltip, and there's a **Legend** button.
@@ -176,6 +181,7 @@ Crewglass reads the records Claude Code already keeps on your Mac. Through Claud
 - **Nothing is written silently.** Edits collect in **Review changes**, which lists them in plain English (e.g. "Create agent *coder* (Opus 5.5 · medium)", "Let *coder* use *github*") → then a file diff → **Save**.
 - **Undo everywhere:** ⌘Z for canvas edits, **Undo last save** restores files.
 - **Keyboard:** ⌘O folder · ⌘S review and save · ⌘Z / ⇧⌘Z · ⌘F find · ⌘. Stop · ⌘1/2/3 tabs.
+- **Appearance:** a **System / Light / Dark** control in the top bar and the first-run wizard; System follows macOS. The choice is remembered. States always have a text label as well as a color.
 
 ### 2.3 Status colors
 
@@ -258,7 +264,7 @@ Status files that don't match are dropped on the spot and never stored, counted 
   |---|---|
   | `SessionStart` | **Nothing Claude reads, ever.** Only a one-line notice for you (`systemMessage`: shown in the chat, never added to Claude's context; verified): which agent the chat runs as, what it starts on, who it hands work to. The helper drops anything else. Can be switched off in Settings |
   | `UserPromptSubmit` | **For your own messages: nothing, ever**, and the Stop flag **clears**, so your next message after a Stop works normally. **For a `<task-notification>`** (a background subagent finished; verified in Phase 0a) the Stop flag stays set, and the app may add a note with that agent's check results (`additionalContext`) |
-  | `PreToolUse` (all tools, including `Agent`) | **allow** (prints nothing) · **stop** (`continue:false` **plus** `permissionDecision:"deny"`, so no other call in the same batch runs; verified) · **pause this command** (`permissionDecision: "deny"` + a reason Claude reads) · for an `Agent` call **made by a subagent**: check the `Reason:` line, then allow, refuse with a reason, or **wait for your approval** (up to 2 min, then route to the orchestrator) (§6.5) |
+  | `PreToolUse` (all tools, including `Agent`) | **allow** (prints nothing) · **stop** (`continue:false` **plus** `permissionDecision:"deny"`, so no other call in the same batch runs; verified) · **pause this command** (`permissionDecision: "deny"` + a reason Claude reads) · for an `Agent` call **made by a subagent**: check the `Reason:` line, then allow, refuse with a reason, or **wait for your approval** (up to 2 min, then route to the orchestrator) (§6.6) |
   | `PostToolUse`, `PostToolUseFailure` | nothing · **stop** · **pass a note to Claude** (`additionalContext`): your instructions, or check results for the orchestrator after a foreground `Agent` call |
   | `SubagentStop`, main `Stop` | allow · **send back to fix** (`{"decision":"block","reason":<failure summary>}`), at most 2 times, also guarded by `stop_hook_active` |
   | All other events (`SessionEnd`, `CwdChanged`, `StopFailure`, `PermissionRequest`, `PermissionDenied`, `Notification`, `SubagentStart`, `Pre/PostCompact`, `PostModelSwitch`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`) | Observed only; prints nothing |
@@ -275,12 +281,12 @@ Status files that don't match are dropped on the spot and never stored, counted 
   - 5 s for everything else.
 - **Never slows Claude down:**
   - When the app is running it answers in a few milliseconds.
-  - If it fails to answer within 300 ms three times in a row (for example, it's frozen), the helper stops waiting for 60 s (a small marker file) and simply allows. The exception is direct subagent calls, which get Claude's own prompt instead (§6.5).
+  - If it fails to answer within 300 ms three times in a row (for example, it's frozen), the helper stops waiting for 60 s (a small marker file) and simply allows. The exception is direct subagent calls, which get Claude's own prompt instead (§6.6).
   - Approvals don't count as slow: the app answers "waiting for approval" at once, and the helper then waits for your decision.
   - Large events (e.g. a big file write) are read fully but only the whitelisted fields are parsed.
 - **Fields forwarded:**
   - Forwarded: `hook_event_name`, `session_id`, `cwd`, `transcript_path`, `agent_id`, `agent_type`, `tool_name`, `tool_use_id`, `permission_mode`, `notification_type`, error type, `stop_hook_active`, and a short `target` (a relative file path, the command signature cut to 80 characters, a subagent type, an MCP tool, an agy model).
-  - For `Agent` calls only, two small structured pieces, held in memory only (§6.5): the `Reason:` line (up to 200 characters), and the agent **names** from an `Allowed calls:` line.
+  - For `Agent` calls only, two small structured pieces, held in memory only (§6.6): the `Reason:` line (up to 200 characters), and the agent **names** from an `Allowed calls:` line.
   - **Never forwarded:** `prompt`, the rest of `tool_input`, `tool_response`, assistant messages.
 - **Fail-open:** if the app isn't running, or doesn't answer within 300 ms (gates: within your check timeout), the helper **allows** and exits 0. Claude is never blocked by Crewglass being absent.
 - **Install and remove:**
@@ -342,7 +348,7 @@ Status files that don't match are dropped on the spot and never stored, counted 
   - The orchestrator **always keeps the `Agent` tool**, even with "Only what I connect", because it needs it to hand work out.
 - **How hand-offs really work** (verified in Phase 0a):
   - The orchestrator hands work to subagents.
-  - **A subagent can also call another subagent directly, but only with a clear reason and an approval** (D18, §6.5). This saves tokens, because the work doesn't have to go back through the orchestrator's large context each time.
+  - **A subagent can also call another subagent directly, but only with a clear reason and an approval** (D18, §6.6). This saves tokens, because the work doesn't have to go back through the orchestrator's large context each time.
   - The canvas draws the **real** route from each event's `agent_id` and the subagent's `parentAgentId`: direct, or via the orchestrator.
   - Without an orchestrator agent — the default — the same rules apply, and your chat plays the orchestrator's part: the team map tells it which agent to hand each kind of work to, to answer quick questions itself, and to end with a verification table only when it handed work out. Checks on a hand-off from the chat are stored under `@chat`.
 - **Subagents often run in the background** (verified). The orchestrator is woken when each one finishes. Crewglass follows this through `SubagentStop`, and the canvas shows background agents as running until then.
@@ -413,10 +419,18 @@ Status files that don't match are dropped on the spot and never stored, counted 
     - After that the agent may stop, and you get an inbox item and a pop-up (§8).
     - The orchestrator gets a note ("coder FAILED `npm test` after 2 fix attempts: …"): on the `Agent` call's result if the subagent ran in the foreground, or on the task notification if it ran in the background (both verified).
   - **Verdict checks:** written into the team map as required steps. Crewglass confirms each one happened by reading **only** the `VERDICT: PASS|FAIL` word from the checker's reply. A missing or failed verdict shows ✗ on the link.
+  - **Run pipeline:** the app itself runs every check between steps. Hook checks are skipped for pipeline sessions, so nothing runs twice.
 - **Command checks are stored privately** in the app's data per folder, not in the repo. A cloned or malicious repo can never make Crewglass run commands. The first time a check is enabled, you confirm its exact command.
 - **On the canvas:** each link shows ✓ passed · ✗ failed (try 1/2) · ⏳ checking.
 
-### 6.5 Direct calls between subagents: reason + approval (D18)
+### 6.5 Run pipeline (guaranteed order)
+
+- A confirmation dialog shows the task, each step (agent, model · effort, tools, checks), the permission mode, the turn cap per step and stop-on-failure.
+  - The permission mode defaults to `plan`, which can only read. You can choose `acceptEdits`. "Bypass" is never used.
+- Each step runs `claude -p --agent <name> --effort <level> --permission-mode <mode> --output-format stream-json` in the folder, with the previous step's output added to its prompt. Checks run between steps.
+- Progress animates on the canvas. **Stop** ends it cleanly by killing the process group. Output is shown live and can be copied; only numbers are stored.
+
+### 6.6 Direct calls between subagents: reason + approval (D18)
 
 **Why:** a subagent calling a helper directly skips a round trip through the orchestrator's large context, which saves tokens. But unchecked calls can fan out and burn tokens. So every direct call needs **a clear reason** and **an approval**.
 
@@ -480,7 +494,7 @@ Clicking a link changes its state.
 | **"Claude may be stuck"** | 5 or more failures of any kind within 10 min → the same four choices. Nothing is paused automatically | Warning: no · choices: yes |
 | **Subagent loop** | The same subagent launched with an **identical task** 3 or more times in one turn (compared by a one-way hash, never the text) → warning + choices. Sending coder several *different* tasks is normal and never triggers it | Warning: no · choices: yes |
 | **Check retry cap** | At most 2 automatic "fix it" rounds per check (§6.4) | Yes |
-| **Direct-call approvals (D18)** | A subagent calling another subagent needs a `Reason:` line and an approval: you in advance (drawn link), the orchestrator, or you for costly calls. At most 2 levels deep and 3 direct calls per agent run (§6.5) | Yes (without it: only subagents with a drawn link can call at all) |
+| **Direct-call approvals (D18)** | A subagent calling another subagent needs a `Reason:` line and an approval: you in advance (drawn link), the orchestrator, or you for costly calls. At most 2 levels deep and 3 direct calls per agent run (§6.6) | Yes (without it: only subagents with a drawn link can call at all) |
 | **Per-agent caps** | `maxTurns` in every agent file; relays capped at 3 | No (Claude Code enforces it) |
 | **agy call cap** | Warn after more than 3 agy calls in one turn, i.e. from your message until Claude finishes  | No |
 | **Context almost full** | Warn at 85%, once per session, reset after a compaction | No |
@@ -497,8 +511,8 @@ The rule: **a macOS pop-up only when you need to act, or when a long task ends.*
 |---|---|---|
 | **Claude needs permission** (`permission_prompt` / `PermissionRequest`) | ✅ Yes, but only if it's **still waiting after 20 s** (adjustable). If you're already looking at VS Code you'll have answered, and the pop-up is cancelled | Answered within 20 s: nothing |
 | **A failing command was paused** (needs your choice) | ✅ Yes | — |
-| **A costly direct call needs your OK** (§6.5) | ✅ Yes; the subagent is waiting (2 min, then it goes to the orchestrator) | Calls the orchestrator decides, and pre-approved calls: Activity tab only |
-| **Work failed for good** (a check still failing after 2 tries, `StopFailure`) | ✅ Yes | — |
+| **A costly direct call needs your OK** (§6.6) | ✅ Yes; the subagent is waiting (2 min, then it goes to the orchestrator) | Calls the orchestrator decides, and pre-approved calls: Activity tab only |
+| **Work failed for good** (a check still failing after 2 tries, a pipeline step failed, `StopFailure`) | ✅ Yes | — |
 | **Claude finished a task** (it goes idle, waiting for your next message) — changed at your request: **after every task** by default, or only tasks longer than N min (Settings). Never for "waiting for permission", a Stop you pressed, or single pipeline steps; a pipeline notifies once when it ends | ✅ Yes (Mac notification) | — |
 | **Limit reached (100%)** | ✅ Once per session or day | 80%: inbox + amber meter only |
 | Context ≥ 85%, "Claude may be stuck", subagent loop, an MCP process died, the first check failure (being fixed automatically), second failure of a command | ❌ | 🔔 inbox |
@@ -508,6 +522,7 @@ The rule: **a macOS pop-up only when you need to act, or when a long task ends.*
   - **Grouping:** several events within 10 s become one pop-up ("3 things need you in *agent app*").
   - **Cooldown:** 2 min per type per session.
   - macOS **Focus / Do Not Disturb** is respected.
+  - Every row can be switched off in Settings.
 - **Clicking a pop-up:**
   - If you need to act inside VS Code (e.g. permission): `open -a "Visual Studio Code" "<folder>"` brings that window forward.
   - If it's a decision (paused command): it opens that 🔔 item, with the 4 choices and **Stop**.
@@ -536,6 +551,7 @@ The rule: **a macOS pop-up only when you need to act, or when a long task ends.*
 | **Supply chain** | Few dependencies, exact versions and a lockfile, `npm ci`, `npm audit` and install-script review in `npm run check`, no telemetry packages. Building downloads open-source packages once; **the running app never goes online** |
 | **The Electron runtime is misused** | Electron fuses: RunAsNode **off**, NODE_OPTIONS **off**, the inspector CLI **off**, asar integrity **on**, load only from the app bundle **on**. That's possible because the hook helper is a separate Swift program. The app data folder is `0700` |
 | **Safeguards harm Claude** | The helper allows everything if the app is absent or slow. On `SessionStart` it prints at most a notice for you (never context for Claude); on your own prompts, nothing. Hard timeouts. Retry caps and `stop_hook_active` prevent loops |
+| **Pipeline damage** | Defaults to `plan`, which can only read. Bypass is never used. You confirm every step. Stop kills the whole process group |
 
 ### 9.2 How it's checked
 
@@ -765,6 +781,16 @@ scripts/probe.ts · docs/data-sources.md · docs/security.md · test/ (+ fixture
 - **Double border** on an agent card = an open Claude Code chat runs as that agent (Claude runs agents by name, so only the copy it uses). A plain chat marks no agent.
 - The start-of-chat note for a chat-led folder: *Crewglass: this chat leads your team · hands work to coder, reviewer · /workflow <task> runs the full team steps*.
 
+### Dollars, wrap-up, status line, /handoff (2026-10-07)
+
+- **Dollars:** `src/shared/pricing.ts` (Claude API prices, 2026-09-25). Each reply is priced once (its last snapshot) by its own model; cache writes use the recorded 5-minute / 1-hour split (no split → the dearer 1-hour rate); fast mode ×2. Shown in the top bar, Usage tab (with today by model), History (Cost column) and agent cards.
+- **Wrap-up at 95%:** delivered as `additionalContext` after the main chat's next tool step (the helper never adds context to your own prompts). **Verified with real Claude Code (Haiku):** without project instructions Claude treated the note as untrusted text in a tool result and didn't act; with `.claude/rules/crewglass-usage.md` it stopped new work, told the user and wrote the handoff — Claude Code asks your permission before writing inside `.claude/`.
+- **Status line:** the helper's `--statusline` mode (no Node needed): model and context % come from Claude Code; Crewglass adds today's spend vs the limit, this session's spend, what the chat runs as and a waiting handoff note. Added with Live mode, never over a status line of your own, removed with Live mode / Uninstall; Settings switch applies to every Live mode folder.
+- **`/handoff` + `/pickup`:** marked copies only (a command you wrote is never touched); the note `.claude/handoff.md` goes into `.git/info/exclude`; a new chat's start-of-chat note mentions a waiting note first.
+- **Templates:** explorer (Haiku, read-only), coder, reviewer (keeps the `VERDICT:` line checks rely on), tester (Haiku, edits tests only), planner, researcher, docs-writer — each with a short "What to return" section. `omitClaudeMd` only for explorer, reviewer and researcher: roles that need project conventions or the team map's direct-call rules keep CLAUDE.md.
+- **Limits reset once more** (tokens → dollars), with an inbox note.
+- **Also found:** `npm audit` reports 13 new advisories, all in build tools (the app ships no npm packages). Two in-range updates applied; `braces` (high) has no fixed version, so `npm run check` uses `scripts/check-audit.mjs`, which fails on any high/critical advisory except reviewed ones (each with a reason). Claude Code 2.1.288 added `usage.fallback_credit` (refusal-fallback credit, null so far): now a known field.
+
 ### Token counting and new models (Claude Code 2.1.284)
 
 - **Checked against the transcripts:** the app's totals matched an independent count exactly (this folder: 8,804,104 for the long chat, 423,542 "today"), with no message counted twice across files.
@@ -874,3 +900,37 @@ With Live mode off, Crewglass is purely a viewer.
 - Plan usage limits (they live on Anthropic's servers), dollar costs.
 - VS Code Remote, SSH and dev containers.
 - Standalone agy or Gemini sessions, the Claude desktop app, Windows and Linux, syncing between Macs.
+
+## 16. Testing
+
+- **Automated (vitest):**
+  - `scope`: subfolders, symlinks, spaces, look-alike names, `CwdChanged`, each session kind;
+  - `transcripts`: dedupe, partial lines, backfill → live handover, model and effort extraction;
+  - `graphBuilder` (including same-name agents tracked by file), `conformance`, `models` (friendly names, mismatch);
+  - `formatWatch`: unknown field, unknown entry type or value → blue box; missing or re-typed field → amber box; the report never contains values; dismissed per version;
+  - `alerts`: the pop-up vs inbox rules, no pop-ups while the app is in front, grouping, cooldowns;
+  - `breaker`: signature normalization, the count reaching 3, **reset after a file edit**, pausing, each of your 4 choices;
+  - `budgets` (warning thresholds, subagents included), `stopControl` (the Stop flag clears on your next message; Stop all vs one session);
+  - subagent-loop detection: identical-task hashes count, different tasks don't;
+  - direct-call approvals:
+    - a missing or vague `Reason:` is refused;
+    - drawn Allowed links and orchestrator `Allowed calls:` grants pass;
+    - a non-costly call is routed to the orchestrator as a `REQUEST`;
+    - a costly call waits for you, then goes to the orchestrator after 2 min;
+    - the depth and per-run limits hold;
+    - the app-absent case answers with Claude's own prompt;
+    - the reason text is never written to disk;
+  - check triggering: runs only when the agent changed files, in the right folder or worktree, skipped for pipeline sessions;
+  - the 20 s permission pop-up delay, cancelled when the prompt is answered;
+  - `checks/runner`: timeout, output trimming, secret masking, argument splitting without a shell;
+  - `hookInstaller`: running it twice changes nothing, exact restore, a concurrent write;
+  - `agentWriter`: round-trip safety;
+  - `pathGuard`: allowlist, symlinks, traversal, secret guard, home-path guard;
+  - IPC and socket schemas (fuzzed); the network-block test.
+- **Swift helper:**
+  - it allows everything when the app is missing;
+  - the 300 ms timeout and the 60 s stop-waiting marker after 3 slow answers;
+  - on `SessionStart` it prints only a `systemMessage` notice (anything else, or over 300 characters, is dropped); nothing for your own prompts;
+  - its output for each possible answer matches saved reference files;
+  - large payloads are handled.
+- **Manual:** the "Done when" column in §12, plus the privacy and security checks in §9.2 at every phase.

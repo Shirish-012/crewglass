@@ -1,11 +1,12 @@
 import { useState, type DragEvent, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { actions, toast, useDeck } from "../state/store";
-import { EFFORTS, LISTED_CLAUDE, geminiModels, modelWithEffort } from "@shared/models";
+import { EFFORTS, LISTED_CLAUDE, findModel, geminiModels, modelLabel, modelWithEffort } from "@shared/models";
+import { priceOf } from "@shared/pricing";
 import { checkCommandProblem } from "@shared/checks";
-import type { Effort, McpScope } from "@shared/types";
+import type { Agent, Effort, McpScope } from "@shared/types";
 import { BUILTIN_AGENTS, ROLE_TEMPLATES, TEAM_PRESETS } from "../mock/fixtures";
-import { Icon, seriesVar } from "./ui";
+import { Icon } from "./ui";
 import { FormatNotice } from "./FormatNotice";
 
 export const DND_TYPE = "application/x-crewglass";
@@ -105,6 +106,81 @@ function CustomCheck({ onAdd }: { onAdd: (command: string) => boolean }) {
   );
 }
 
+const EFFORT_HINT: Record<Effort, string> = {
+  low: "fastest, cheapest — quick lookups and simple edits", medium: "balanced — most everyday work",
+  high: "more careful — tricky changes and reviews", xhigh: "deep — long, hard coding tasks", max: "deepest, priciest — when correctness matters most",
+};
+/** One compact picker instead of a row of effort chips per model: choose a model and effort, then apply it to the
+ *  selected agent or start a new agent with it — or drag the card onto any agent. */
+function ModelPicker({ selected, onApply, geminiExtra }: { selected?: Agent; onApply: (model: string, effort?: Effort) => void; geminiExtra: string[] }) {
+  const [model, setModel] = useState("claude-opus-5-5");
+  const [effort, setEffort] = useState<Effort>("medium");
+  const m = findModel(model);
+  const gemini = model.startsWith("gemini-") || m?.family === "gemini";
+  const usesEffort = !gemini && m?.usesEffort !== false;
+  const price = priceOf(model);
+  const chosenEffort = usesEffort ? effort : undefined;
+  const label = gemini ? `agy · ${modelLabel(model)}` : modelWithEffort(model, chosenEffort);
+  const target = selected && selected.kind !== "builtin" && (gemini ? selected.kind === "agy" : selected.kind !== "agy") ? selected : undefined;
+  return (
+    <div className="model-picker" draggable onDragStart={drag({ t: "model", model, effort: chosenEffort })} title="Drag onto an agent, or use the button">
+      <div className="field"><label>Model</label>
+        <select className="select" value={model} onChange={(e) => setModel(e.target.value)} aria-label="Model">
+          <optgroup label="Claude">{LISTED_CLAUDE().map((x) => <option key={x.id} value={x.id}>{x.label} · {x.contextWindow >= 1_000_000 ? "1M" : "200k"} context</option>)}</optgroup>
+          <optgroup label="Gemini via agy">{geminiModels(geminiExtra.map((id) => ({ id }))).map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</optgroup>
+        </select>
+      </div>
+      {usesEffort ? (
+        <div className="field"><label>Effort</label>
+          <div className="seg" role="radiogroup" aria-label="Effort">
+            {EFFORTS.map((e) => <button key={e} className={effort === e ? "on" : ""} role="radio" aria-checked={effort === e} onClick={() => setEffort(e)}>{e}</button>)}
+          </div>
+          <span className="muted small">{EFFORT_HINT[effort]}</span>
+        </div>
+      ) : <span className="muted small">{gemini ? "Gemini runs through agy; its effort is part of the model name." : "This model has no effort setting."}</span>}
+      {price && <span className="muted small">${price.input} in · ${price.output} out per million tokens (Claude API prices)</span>}
+      <button className="btn primary small" onClick={() => onApply(model, chosenEffort)}>
+        <Icon name={target ? "check" : "plus"} size={13} /> {target ? `Set ${target.name} to ${label}` : `New ${gemini ? "agy agent" : "agent"} · ${label}`}
+      </button>
+      <span className="muted small">Select an agent first to change its model, or drag this card onto it.</span>
+    </div>
+  );
+}
+
+/** "Add agent ▾": one tidy menu of ready-made roles (what each is for, and its model) instead of a cloud of chips. */
+const ROLE_HINT: Record<string, string> = {
+  explorer: "finds where/how things work · read-only", planner: "plans before code is written", coder: "writes and changes code",
+  reviewer: "reviews changes · PASS / FAIL", tester: "runs and fixes tests", researcher: "answers questions with sources", "docs-writer": "updates README and docs",
+};
+function AddAgentMenu() {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const add = (id: string) => { setAt(null); actions.addAgentFromTemplate(id, nextFreePosition()); };
+  return (
+    <div style={{ padding: "4px 8px 8px" }}>
+      <button className="btn small" style={{ width: "100%", justifyContent: "center" }} aria-haspopup="menu" aria-expanded={!!at}
+        onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setAt(at ? null : { x: r.left, y: r.bottom + 4 }); }}>
+        <Icon name="plus" size={13} /> Add agent <Icon name="down" size={12} />
+      </button>
+      {at && (
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 59 }} onClick={() => setAt(null)} />
+          <div className="menu" role="menu" style={{ left: at.x, top: at.y, width: 300 }}>
+            <div className="sub-title">Add an agent to this team (you can edit everything after)</div>
+            {ROLE_TEMPLATES.map((t) => (
+              <button key={t.id} role="menuitem" onClick={() => add(t.id)} title={t.role}>
+                <span className="grow"><b>{t.name}</b> <span className="muted small">— {ROLE_HINT[t.id] ?? t.role}</span></span>
+                <span className="muted small">{modelWithEffort(t.model, t.effort)}</span>
+              </button>
+            ))}
+            <div className="sep" />
+            <div className="sub-title">Or drag a model from Models onto the canvas for a blank agent</div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function Library() {
   const [q, setQ] = useState("");
   const s = useDeck(useShallow((st) => ({ agents: st.agents, userAgents: st.userAgents, mcps: st.mcps, checks: st.checks, selection: st.selection, addMcpOpen: st.addMcpOpen, agy: st.agy })));
@@ -160,15 +236,7 @@ export function Library() {
               sub={a.kind === "agy" ? `agy · ${modelWithEffort(a.geminiModel ?? "")}` : modelWithEffort(a.model, a.effort)}
               right={a.keepPrivate ? <span title="Kept private (not in git)"><Icon name="lock" size={13} /></span> : undefined} />
           ))}
-          <div className="lib-sub">Add a new agent from a role — drag onto the canvas or click</div>
-          <div className="row" style={{ flexWrap: "wrap", gap: 5, padding: "2px 8px 6px" }}>
-            {ROLE_TEMPLATES.filter((t) => match(t.name, t.role)).map((t) => (
-              <span key={t.id} className="chip selectable" draggable onDragStart={drag({ t: "template", id: t.id })}
-                onClick={() => actions.addAgentFromTemplate(t.id, nextFreePosition())} title={`${t.role} (${modelWithEffort(t.model, t.effort)})`}>
-                <Icon name="plus" size={12} /> {t.name}
-              </span>
-            ))}
-          </div>
+          <AddAgentMenu />
           {s.userAgents.length > 0 && <div className="lib-sub">Available in all your projects</div>}
           {s.userAgents.filter((a) => match(a.name, a.role)).map((a) => (
             <Item key={a.key} icon={<Icon name="team" />} title={a.name}
@@ -182,34 +250,11 @@ export function Library() {
         </Section>
 
         <Section title="Models">
-          <div className="lib-sub">Claude — drag onto an agent to set its model and effort</div>
-          {LISTED_CLAUDE().filter((m) => match(m.label)).map((m) => (
-            <div key={m.id} className="model-row" draggable onDragStart={drag({ t: "model", model: m.id, effort: m.usesEffort ? "medium" : undefined })}>
-              <div className="row">
-                <span className="dot" style={{ background: seriesVar(m.colorSlot) }} />
-                <strong className="grow">{m.label}</strong>
-                <span className="muted small">{m.contextWindow >= 1_000_000 ? "1M" : "200k"} context</span>
-                <button className="icon-btn add" onClick={() => addModel(m.id, m.usesEffort ? "medium" : undefined)}
-                  title={selectedAgent ? `Set ${selectedAgent.name} to ${m.label}` : `New agent on ${m.label}`}><Icon name="plus" size={15} /></button>
-              </div>
-              {m.usesEffort ? (
-                <div className="efforts">
-                  {EFFORTS.map((e) => (
-                    <span key={e} className="chip selectable" draggable onDragStart={(ev) => { ev.stopPropagation(); drag({ t: "model", model: m.id, effort: e })(ev); }}
-                      onClick={() => addModel(m.id, e)} title={selectedAgent ? `Set ${selectedAgent.name} to ${m.label} · ${e}` : `Drag onto an agent`}>{e}</span>
-                  ))}
-                </div>
-              ) : <div className="muted small" style={{ marginTop: 3 }}>No effort setting for this model</div>}
-            </div>
-          ))}
-          <div className="lib-sub row"><span className="grow">Gemini via agy (runs through a tiny Haiku relay)</span>
+          <ModelPicker selected={selectedAgent} onApply={addModel} geminiExtra={s.agy.models} />
+          <div className="lib-sub row"><span className="grow">Gemini models come from agy (via a tiny Haiku relay)</span>
             <button className="btn ghost small" disabled={refreshing} onClick={() => void refreshGemini()}
-              title="Runs `agy models` once, only now. agy may contact Google to answer.">{refreshing ? "Asking agy…" : "Refresh"}</button></div>
+              title="Runs `agy models` once, only now. agy may contact Google to answer.">{refreshing ? "Asking agy…" : "Refresh list"}</button></div>
           {!s.agy.ready && <div className="hint small" style={{ margin: "0 8px 6px" }}><Icon name="info" size={13} /><span>agy agents can't run here yet: {s.agy.missing}.</span></div>}
-          {geminiModels(s.agy.models.map((id) => ({ id }))).filter((m) => match(m.label)).map((m) => (
-            <Item key={m.id} icon={<span className="dot" style={{ background: seriesVar(m.colorSlot) }} />} title={m.label} sub="agy agent"
-              payload={{ t: "model", model: m.id }} onAdd={() => addModel(m.id)} addTitle={selectedAgent?.kind === "agy" ? `Set ${selectedAgent.name} to ${m.label}` : "New agy agent"} />
-          ))}
         </Section>
 
         <Section title="MCP servers" count={Object.keys(s.mcps).length}>

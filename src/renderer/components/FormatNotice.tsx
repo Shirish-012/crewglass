@@ -53,7 +53,7 @@ export function FormatNotice() {
             </tbody>
           </table>
           <div style={{ marginTop: 10 }} className="small">{SOURCE_REPO ? "Where to fix it — Crewglass's own source code on this Mac:"
-            : "Where to fix it — in Crewglass's source code, which isn't on this Mac. Copy the fix request and send it to whoever builds your copy:"}</div>
+            : "Where to fix it — in Crewglass's source code, which isn't on this Mac (set its folder in Settings if you have it). Copy the fix request and send it to whoever builds your copy:"}</div>
           <div className="codebox" style={{ marginTop: 4 }}>{SOURCE_REPO || "Crewglass source"}{"\n"}{files.map((f) => `  → ${f}`).join("\n")}</div>
           <div className="row" style={{ marginTop: 10 }}>
             {SOURCE_REPO && <button className="btn primary small" onClick={() => openInVSCode(`${SOURCE_REPO}/${files[0]}`)}><Icon name="code" size={14} /> Open in VS Code</button>}

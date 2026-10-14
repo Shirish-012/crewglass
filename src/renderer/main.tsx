@@ -4,11 +4,16 @@ import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { App } from "./App";
 import { actions, useDeck } from "./state/store";
+import { applyTheme, useAppearance, type ThemeChoice } from "./components/Appearance";
+
+applyTheme(useAppearance.getState().choice);
 
 // Deep links, e.g. #main&scenario=approval&inbox — used to review screens and take screenshots.
 // Fake-data links (main, chat, scenario, preset) only work in the prototype, never in the real app.
 function applyHash(real: boolean) {
   const params = new URLSearchParams(location.hash.slice(1));
+  if (params.has("theme")) useAppearance.getState().set(params.get("theme") as ThemeChoice);
+  if (params.has("onboard")) useDeck.setState({ onboardStep: Number(params.get("onboard")) || 0 });
   if (!real) {
     if (params.has("main")) actions.skipOnboarding();
     if (params.has("chat")) actions.scenario("this-chat");
@@ -22,6 +27,8 @@ function applyHash(real: boolean) {
   if (params.has("bottom")) useDeck.setState({ bottomOpen: true, bottomTab: params.get("bottom") as "usage" });
   if (params.has("inbox")) useDeck.setState({ inboxOpen: true });
   if (params.has("review")) useDeck.setState({ reviewOpen: true });
+  if (params.has("run")) useDeck.setState({ runOpen: true });
+  if (params.has("settings")) useDeck.setState({ settingsOpen: true });
   if (params.has("legend")) useDeck.setState({ legendOpen: true });
   if (params.has("format")) useDeck.setState({ formatOpen: true });
   if (params.has("proto")) useDeck.setState({ protoOpen: true });

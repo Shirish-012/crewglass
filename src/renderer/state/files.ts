@@ -1,6 +1,7 @@
 // Turns the difference between the last-saved design and the current one into real file changes,
 // so "Review changes" shows exactly what Save would write.
 
+import { HANDOFF_COMMAND, HANDOFF_FILES, PICKUP_COMMAND, USAGE_RULES } from "@shared/handoff";
 import type { Agent, Check, FileChange, Link, McpServer } from "@shared/types";
 import { renderAgentFile } from "@shared/agentFile";
 import { renderTeamMap } from "@shared/teamMap";
@@ -12,6 +13,8 @@ export interface Design {
   orchestratorKey: string | null;
   orchestratorPaused: boolean;
   checks: Record<string, Check>;
+  /** /handoff and /pickup commands in this folder (Crewglass's copies). */
+  handoff?: boolean;
 }
 
 const agentPath = (a: Agent) => (a.scope === "user" ? `~/.claude/agents/${a.name}.md` : `.claude/agents/${a.name}.md`);
@@ -72,6 +75,9 @@ export function diffDesigns(saved: Design, current: Design): FileChange[] {
     [".claude/settings.local.json", settingsLocal, false],
     [".claude/rules/crewglass-team.md", teamMap, true],
     [".mcp.json", mcpJson, true],
+    [HANDOFF_FILES.handoff, (d) => (d.handoff ? HANDOFF_COMMAND : ""), true],
+    [HANDOFF_FILES.pickup, (d) => (d.handoff ? PICKUP_COMMAND : ""), true],
+    [HANDOFF_FILES.rules, (d) => (d.handoff ? USAGE_RULES : ""), true],
   ];
   for (const [path, render, shared] of pairs) {
     const b = render(saved);

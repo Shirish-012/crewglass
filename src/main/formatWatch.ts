@@ -4,7 +4,7 @@
 import type { FormatIssue } from "@shared/types";
 import { KNOWN_ENTRY_TYPES, KNOWN_USAGE_KEYS, type FormatSeen } from "./sources/transcripts";
 
-export const TESTED_CLAUDE_VERSION = "2.1.281";
+export const TESTED_CLAUDE_VERSION = "2.1.288";
 
 const KNOWN_SESSION_FIELDS = new Set([
   "pid", "sessionId", "cwd", "startedAt", "procStart", "version", "peerProtocol", "peerFeatures", "kind", "entrypoint",

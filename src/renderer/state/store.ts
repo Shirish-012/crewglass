@@ -18,7 +18,7 @@ import type { Design } from "./files";
 export type Selection = { type: "agent" | "mcp" | "link" | "session"; id: string } | null;
 export interface Toast { id: string; title: string; body: string; inboxId?: string; at: number }
 export type { SeriesPoint } from "@shared/ipc";
-import type { SeriesPoint } from "@shared/ipc";
+import type { PipelineProgress, SeriesPoint } from "@shared/ipc";
 import { tidyPositions } from "./layout";
 export type BottomTab = "usage" | "activity" | "history";
 type Pos = { x: number; y: number };
@@ -41,6 +41,7 @@ export interface DeckState extends Design {
   agy: { ready: boolean; missing: string | null; models: string[]; tokensToday: number; callsToday: number };
   // setup
   onboarded: boolean;
+  onboardStep: number;
   folder: string;
   recentFolders: string[];
   liveMode: boolean;
@@ -60,6 +61,8 @@ export interface DeckState extends Design {
   stopFlag: boolean;
   todayTokens: number;
   todayCache: { write: number; read: number };
+  todayUsd: number;
+  todayUsdByModel: Record<string, number>;
   activity: ActivityEvent[];
   inbox: InboxItem[];
   toasts: Toast[];
@@ -76,7 +79,13 @@ export interface DeckState extends Design {
   bottomTab: BottomTab;
   inboxOpen: boolean;
   reviewOpen: boolean;
+  /** Run pipeline: the dialog, and the latest progress from the app (memory only). */
+  runOpen: boolean;
+  pipeline: PipelineProgress | null;
+  settingsOpen: boolean;
   uninstallOpen: boolean;
+  /** First-run wizard: the team preset to add once the new folder's first snapshot arrives. */
+  pendingPreset: string | null;
   legendOpen: boolean;
   formatOpen: boolean;
   protoOpen: boolean;
@@ -91,7 +100,7 @@ const nid = (p: string) => `${p}${++idSeq}`;
 
 export const designOf = (s: Design): Design => ({
   agents: s.agents, mcps: s.mcps, links: s.links, orchestratorKey: s.orchestratorKey,
-  orchestratorPaused: s.orchestratorPaused, checks: s.checks,
+  orchestratorPaused: s.orchestratorPaused, checks: s.checks, handoff: s.handoff,
 });
 
 function fullDesign(): Design {
@@ -133,10 +142,11 @@ export const useDeck = create<DeckState>(() => {
   return {
     ...design,
     onboarded: false,
+    onboardStep: 0,
     folder: FOLDER,
     recentFolders: [FOLDER],
     liveMode: true,
-    limits: { session: 1_000_000, day: 1_500_000 },
+    limits: { session: 25, day: 50 },
     userAgents: initialUserAgents(),
     positions: initialPositions(),
     saved: clone(design),
@@ -148,6 +158,8 @@ export const useDeck = create<DeckState>(() => {
     stopFlag: false,
     todayTokens: 340_000,
     todayCache: { write: 1_200_000, read: 9_800_000 },
+    todayUsd: 18.4,
+    todayUsdByModel: { "claude-opus-5-5": 14.9, "claude-sonnet-5-5": 3.1, "claude-haiku-4-5-20251001": 0.4 },
     activity: [],
     inbox: [],
     toasts: [],
@@ -163,7 +175,11 @@ export const useDeck = create<DeckState>(() => {
     bottomTab: "usage",
     inboxOpen: false,
     reviewOpen: false,
+    runOpen: false,
+    pipeline: null,
+    settingsOpen: false,
     uninstallOpen: false,
+    pendingPreset: null,
     legendOpen: false,
     formatOpen: false,
     protoOpen: false,
@@ -245,7 +261,7 @@ function realPreset(id: string) {
         const key = `project:.claude/agents/${t.name}.md`;
         a = d.agents[key] = {
           ...fresh, key, name: t.name, kind: "subagent", scope: "project", file: `.claude/agents/${t.name}.md`, role: t.role, instructions: t.instructions,
-          model: t.model, effort: t.effort, maxTurns: t.maxTurns, toolAccess: t.toolAccess, builtinTools: t.builtinTools ?? ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+          model: t.model, effort: t.effort, maxTurns: t.maxTurns, toolAccess: t.toolAccess, ...(t.omitClaudeMd ? { omitClaudeMd: true } : {}), builtinTools: t.builtinTools ?? ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
         };
       }
       keyOf[role] = a.key;
@@ -367,7 +383,7 @@ export const actions = {
     edit(`Create agent ${name} (${modelWithEffort(t.model, t.effort)})`, (d) => {
       d.agents[key] = {
         key, name, kind: "subagent", scope: "project", file: `.claude/agents/${name}.md`, role: t.role, instructions: t.instructions,
-        model: t.model, effort: t.effort, maxTurns: t.maxTurns, toolAccess: t.toolAccess,
+        model: t.model, effort: t.effort, maxTurns: t.maxTurns, toolAccess: t.toolAccess, ...(t.omitClaudeMd ? { omitClaudeMd: true } : {}),
         builtinTools: t.builtinTools ?? ["Read", "Grep", "Glob", "Edit", "Write", "Bash"], keepPrivate: false, checks: [],
         status: "idle", parallel: 0, tokens: 0, calls: 0, skillsUsed: [],
       };
@@ -497,6 +513,12 @@ export const actions = {
       d.links = dedupe(d.links.filter((l) => !(l.from === prev && l.to === key && l.kind === "delegates"))
         .map((l) => (l.from === prev && l.kind === "delegates" ? { ...l, from: key } : l)));
     });
+  },
+
+  /** /handoff and /pickup in this folder (written on Save, after Review changes). */
+  toggleHandoff() {
+    const on = !get().handoff;
+    edit(on ? "Add the /handoff and /pickup commands" : "Remove the /handoff and /pickup commands", (d) => { d.handoff = on; });
   },
 
   /** Back to the default: your Claude Code chat leads, and the orchestrator agent becomes a regular agent. */
@@ -637,6 +659,13 @@ export const actions = {
       d.links = d.links.filter((l) => l.to !== key);
     });
     set({ selection: null });
+  },
+
+  /** First-run wizard finished: apply the chosen team preset as pending (unsaved) changes. */
+  finishOnboarding(presetId: string) {
+    set({ onboarded: true });
+    actions.applyPreset(presetId);
+    if (presetId !== "watch") toast("Team ready to review", "Your team is on the canvas. Nothing is written until you open Review changes and press Save.");
   },
 
   /** Prototype shortcut: jump straight to a folder whose team is already saved. */
@@ -799,7 +828,7 @@ export const actions = {
       }
       case "reset": {
         const e = emptyDesign();
-        set({ ...e, saved: clone(e), summaries: [], undoStack: [], redoStack: [], onboarded: false, selection: null, inbox: [], formatIssues: [], protoOpen: false });
+        set({ ...e, saved: clone(e), summaries: [], undoStack: [], redoStack: [], onboarded: false, onboardStep: 0, selection: null, inbox: [], formatIssues: [], protoOpen: false });
         break;
       }
     }

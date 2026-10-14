@@ -4,7 +4,7 @@
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, Tray, type IpcMainInvokeEvent } from "electron";
 import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readlinkSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { lockDown } from "./privacy";
@@ -13,17 +13,20 @@ import { Deck } from "./deck";
 import { Scope } from "./scope";
 import { installHelper, socketPathFor, startHookServer } from "./live/hookServer";
 import { findAgyEnv, parseAgyModels } from "./agyEnv";
-import { hookCommand, install as installHooks, isInstalled, outdatedHooks, planInstall, planUninstall as planHookRemoval, uninstall as uninstallHooks } from "./live/hookInstaller";
+import { hookCommand, install as installHooks, isInstalled, missingStatusLine, outdatedHooks, setStatusLine, planInstall, planUninstall as planHookRemoval, uninstall as uninstallHooks } from "./live/hookInstaller";
 import type { Server } from "node:net";
 import { applySave, planSave, undoLastSave, type AgyEnv } from "./writers/savePlan";
-import { planChecks, readFolderData, writeFolderData } from "./folderData";
+import { checksFor, planChecks, readFolderData, writeFolderData } from "./folderData";
+import { PipelineRunner, validSpec } from "./pipeline/runner";
+import { runCheck } from "./checks/runner";
 import { planUninstall, runUninstall } from "./uninstall";
 import { pickWatcher } from "./route";
+import { deleteHistory } from "./history";
 import { findTool } from "./tools";
 import { readFolderConfig } from "./sources/configFiles";
 import { AGY_SERVER } from "@shared/agy";
 import { LEGACY } from "@shared/legacy";
-import type { DesignPayload, PopupKind } from "@shared/ipc";
+import type { AppSettings, DesignPayload, PopupKind } from "@shared/ipc";
 import type { Answer, HookMsg, Waiting } from "./live/liveEngine";
 
 declare const __SOURCE_REPO__: string;
@@ -69,6 +72,7 @@ interface Workspace {
   id: number;
   deck: Deck;
   win: BrowserWindow | null;
+  pipeline: PipelineRunner | null;
   pendingChecks: Map<string, ReturnType<typeof planChecks>>;
 }
 
@@ -128,7 +132,7 @@ function showPopup(ws: Workspace, title: string, body: string, openInbox: boolea
 }
 
 function makeWorkspace(folder: string | null): Workspace {
-  const ws: Workspace = { id: ++wsSeq, win: null, pendingChecks: new Map(), deck: null as unknown as Deck };
+  const ws: Workspace = { id: ++wsSeq, win: null, pipeline: null, pendingChecks: new Map(), deck: null as unknown as Deck };
   ws.deck = new Deck(settings, (t, b, id, kind) => notify(ws, t, b, id, kind), __SOURCE_REPO__, userData);
   ws.deck.helperReady = !!helperPath;
   ws.deck.agyEnv = agyEnv;
@@ -145,6 +149,7 @@ function rememberOpenFolders() {
 
 /** "Stop watching": the folder's window closes and its watcher ends (Live mode there then allows everything). */
 function closeWorkspace(ws: Workspace) {
+  ws.pipeline?.stop();
   const i = workspaces.indexOf(ws);
   if (i >= 0) workspaces.splice(i, 1);
   if (ws.win && !ws.win.isDestroyed()) ws.win.destroy();
@@ -202,6 +207,7 @@ function updateTray(force = false) {
     { type: "separator" },
     { label: "Needs your attention…", enabled: open > 0, click: () => { const r = rows.find((x) => x.open) ?? rows[0]; showWindow(r.ws); send(r.ws, "deck:command", "open-inbox"); } },
     { label: "New Window", click: () => showWindow(makeWorkspace(null)) },
+    { label: "Settings…", click: () => { const ws = workspaces[0]; showWindow(ws); send(ws, "deck:command", "open-settings"); } },
     { type: "separator" },
     { label: "Quit Crewglass", click: quit },
   ]));
@@ -217,6 +223,7 @@ function setupMenus() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: "Crewglass", submenu: [
       { role: "about" }, { type: "separator" },
+      { label: "Settings…", accelerator: "CmdOrCtrl+,", click: command("open-settings") },
       { label: "Uninstall Crewglass…", click: command("open-uninstall") },
       { type: "separator" }, { role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" },
       { label: "Quit Crewglass", accelerator: "CmdOrCtrl+Q", click: quit },
@@ -248,6 +255,15 @@ function routeHook(m: HookMsg): Answer | Waiting {
     w, folder: w.deck.scope?.folder ?? null, contains: (cwd: string) => !!w.deck.scope?.contains(cwd), knowsSession: (id: string) => w.deck.knowsSession(id),
   })), m.cwd, m.session_id)?.w;
   return ws ? ws.deck.handleHook(m) : {}; // a folder no window watches: allow, ignore
+}
+
+function appSettings(): AppSettings {
+  const s = settings.data;
+  return {
+    launchAtLogin: s.launchAtLogin, canLaunchAtLogin: app.isPackaged && !testing, popups: s.popups, permissionPopupSec: s.permissionPopupSec, notifyEveryFinish: s.notifyEveryFinish,
+    longTaskMin: s.longTaskMin, chatNotice: s.chatNotice, statusLine: s.statusLine, breakerThreshold: s.breakerThreshold, historyDays: s.historyDays, limits: s.limits, sourceRepo: s.sourceRepo ?? __SOURCE_REPO__,
+    dataFolder: userData, version: app.getVersion(),
+  };
 }
 
 function applyLoginItem() {
@@ -283,6 +299,7 @@ function registerIpc() {
     const other = workspaces.find((w) => w !== ws && w.deck.scope?.folder === folder);
     if (other) { showWindow(other); return false; }
     settings.update({ folder, recentFolders: [folder, ...settings.data.recentFolders.filter((f) => f !== folder)].slice(0, 8) });
+    ws.pipeline?.stop();
     ws.deck.setFolder(folder);
     rememberOpenFolders();
     void ws.deck.poll().then(() => send(ws, "deck:snapshot", ws.deck.snapshot()));
@@ -361,6 +378,9 @@ function registerIpc() {
     const folder = ws.deck.scope?.folder;
     return folder ? undoLastSave(folder, backups()) : { ok: false, error: "Choose a folder first." };
   });
+  // ── Run pipeline: one at a time per window, in its folder, with the agents you saved ──
+  handle("deck:runPipeline", (ws, spec) => startPipeline(ws, spec));
+  handle("deck:stopPipeline", (ws) => { ws.pipeline?.stop(); });
   let refreshing = false;
   handle("deck:refreshAgyModels", async () => {
     // Only when you click it: agy may contact Google to answer. Its output is used for model ids only.
@@ -385,7 +405,41 @@ function registerIpc() {
     if (allowed) execFile("/usr/bin/open", ["-a", "Visual Studio Code", path], () => {});
   });
 
-  // ── Uninstall ──
+  // ── Settings, data, uninstall ──
+  handle("deck:getSettings", () => appSettings());
+  handle("deck:updateSettings", (_ws, patch) => {
+    const clean = cleanSettingsPatch(patch);
+    settings.update(clean);
+    if ("launchAtLogin" in clean) applyLoginItem();
+    if ("statusLine" in clean) {
+      // You flipped the switch: update every folder that has Live mode (only Crewglass's own entries change).
+      setStatusLine(settings.data.statusLine);
+      if (helperPath) for (const f of settings.data.hookFolders) {
+        try { if (isInstalled(f)) installHooks(f, hookCommand(helperPath, socketPath), backups()); } catch { /* a folder that moved or changed: skip */ }
+      }
+    }
+    for (const w of workspaces) w.deck.applySettings();
+    return appSettings();
+  });
+  handle("deck:chooseSourceRepo", async (ws) => {
+    const r = await dialog.showOpenDialog(ws.win!, { title: "Where is Crewglass's source code?", properties: ["openDirectory"] });
+    const folder = r.canceled ? null : Deck.validFolder(r.filePaths[0]);
+    if (folder) settings.update({ sourceRepo: folder });
+    return appSettings();
+  });
+  handle("deck:deleteAllData", () => {
+    try {
+      deleteAllData();
+      for (const w of workspaces) w.deck.setFolder(null);
+      rememberOpenFolders();
+      return { ok: true };
+    } catch (e) { return { ok: false, error: (e as Error).message }; }
+  });
+  handle("deck:testNotification", () => {
+    if (!Notification.isSupported()) return { ok: false, error: "This Mac doesn't allow notifications from apps right now." };
+    new Notification({ title: "Crewglass notifications work", body: "You'll get one like this when Claude finishes a task in a folder Crewglass watches." }).show();
+    return { ok: true };
+  });
   handle("deck:uninstallPlan", () => uninstallPlanNow());
   handle("deck:uninstall", (_ws, opts) =>
     uninstallNow(!!(opts && typeof opts === "object" && (opts as { removeOrchestrator?: unknown }).removeOrchestrator === true)));
@@ -397,6 +451,7 @@ async function uninstallNow(removeOrchestrator: boolean): Promise<{ ok: boolean;
   uninstalling = true;
   settings.freeze();
   if (pollTimer) clearInterval(pollTimer);
+  for (const w of workspaces) w.pipeline?.stop();
   const plan = uninstallPlanNow();
   const { errors } = runUninstall(plan, { removeOrchestrator }, { backups: backups(), runClaude });
   if (app.isPackaged && !testing) app.setLoginItemSettings({ openAtLogin: false });
@@ -417,6 +472,31 @@ async function uninstallNow(removeOrchestrator: boolean): Promise<{ ok: boolean;
 function uninstallPlanNow() {
   const s = settings.data;
   return planUninstall({ hookFolders: s.hookFolders, agyFolders: s.agyFolders, recent: [...s.recentFolders, ...s.openFolders] }, [userData, app.getPath("logs")]);
+}
+
+/** Deletes what Crewglass stored — settings, private checks, save backups — keeping only what undoing Live mode needs:
+ *  the helper, the list of folders with Live mode / the agy bridge, and each folder's original settings.local.json. */
+function deleteAllData() {
+  const s = settings.data;
+  // Kept: what undoing Live mode / the agy bridge needs, and your launch-at-login choice (it's a system setting).
+  const keep = { hookFolders: s.hookFolders, agyFolders: s.agyFolders, launchAtLogin: s.launchAtLogin };
+  const b = backups();
+  if (existsSync(b)) {
+    for (const folder of readdirSync(b)) {
+      const dir = join(b, folder);
+      if (!statSync(dir).isDirectory()) continue;
+      for (const entry of readdirSync(dir)) {
+        const p = join(dir, entry);
+        if (statSync(p).isDirectory() && ownPath(p)) rmSync(p, { recursive: true, force: true }); // save backups
+      }
+    }
+  }
+  const folders = join(userData, "folders");
+  if (ownPath(folders)) rmSync(folders, { recursive: true, force: true });
+  deleteHistory(userData);
+  const logs = app.getPath("logs");
+  if (ownPath(logs)) rmSync(logs, { recursive: true, force: true });
+  settings.reset(keep);
 }
 
 /** Backups of your files from each Save are kept for 30 days (plan §10). */
@@ -448,6 +528,42 @@ function validDesign(d: unknown): DesignPayload | null {
   return tooBig || !agentsOk ? null : (o as unknown as DesignPayload);
 }
 
+const notifiedPipelines = new Set<string>();
+
+function startPipeline(ws: Workspace, spec: unknown): { ok: boolean; error?: string } {
+  const folder = ws.deck.scope?.folder;
+  if (!folder) return { ok: false, error: "Choose a folder first." };
+  const bin = claudeBinary();
+  if (!bin) return { ok: false, error: "The claude command wasn't found." };
+  const v = validSpec(spec);
+  if (typeof v === "string") return { ok: false, error: v };
+  if (ws.pipeline?.running) return { ok: false, error: "A pipeline is already running." };
+  // `claude -p` skips Claude Code's "trust this folder?" prompt, so a pipeline only runs where you already said yes.
+  if (!readFolderConfig(folder).trusted) {
+    return { ok: false, error: "Claude Code hasn't been trusted in this folder yet. Open it in Claude Code once (VS Code or terminal) and accept the trust prompt, then run the pipeline." };
+  }
+  ws.pipeline = new PipelineRunner({
+    claudeBin: bin, folder,
+    checksFor: (agent, caller) => checksFor(readFolderData(userData, folder), agent, caller),
+    runCheck: (def, cwd, signal) => runCheck(def, cwd, signal),
+    onProgress: (p) => {
+      send(ws, "deck:pipeline", p);
+      // One Mac notification when the whole pipeline ends (not one per step; none if you pressed Stop).
+      if (p.status === "done" || p.status === "failed") {
+        if (notifiedPipelines.has(p.id)) return;
+        notifiedPipelines.add(p.id);
+        const failed = p.steps.find((x) => x.status === "failed");
+        notify(ws, p.status === "done" ? `Pipeline finished in ${folder.split("/").pop()}` : `Pipeline stopped at a failed step in ${folder.split("/").pop()}`,
+          p.status === "done" ? `All ${p.steps.length} steps are done.` : `Step ${failed ? failed.index + 1 : "?"} (${failed?.agent ?? "?"}) failed. Open Crewglass for details.`,
+          undefined, p.status === "done" ? "finished" : "check-failed");
+      }
+    },
+    onSession: (id) => ws.deck.markPipelineSession(id),
+  });
+  ws.pipeline.start(v);
+  return { ok: true };
+}
+
 /** The official `claude` CLI, found by absolute path (apps started from the Dock have a minimal PATH). */
 function claudeBinary(): string | null {
   return findTool("claude");
@@ -468,6 +584,7 @@ app.whenReady().then(() => {
   mkdirSync(userData, { recursive: true });
   try { chmodSync(userData, 0o700); } catch { /* best effort */ }
   settings = new SettingsStore(userData);
+  setStatusLine(settings.data.statusLine);
   applyLoginItem();
   pruneBackups();
   // Live mode: the helper lives in Crewglass's data folder; hooks talk to it over a private Unix socket.
@@ -477,10 +594,10 @@ app.whenReady().then(() => {
   socketPath = socketPathFor(userData);
   hookServer = startHookServer(socketPath, routeHook);
   // Folders with Live mode are brought up to date: hooks that run an older helper (e.g. the Agent Deck name's) are
-  // rewritten.
+  // rewritten, and folders from before the status line existed get it too (only where there's none at all).
   if (helperPath) for (const f of settings.data.hookFolders) {
     const cmd = hookCommand(helperPath, socketPath);
-    try { if (outdatedHooks(f, cmd)) installHooks(f, cmd, backups()); } catch { /* moved or changed: skip */ }
+    try { if (outdatedHooks(f, cmd) || (settings.data.statusLine && missingStatusLine(f))) installHooks(f, cmd, backups()); } catch { /* moved or changed: skip */ }
   }
 
   // Which folders to watch: --folder (this run only), else the ones open last time, else the last folder.
@@ -490,12 +607,14 @@ app.whenReady().then(() => {
   for (const f of [...new Set(restore)]) makeWorkspace(f || null);
   if (settings.limitsReset) workspaces[0]?.deck.noteLimitsReset();
 
-  // Test-only switches: --live=on|off for the --folder, --dump=<file> writes each snapshot.
+  // Test-only switches: --live=on|off for the --folder, --dump=<file> writes each snapshot, --run-pipeline=<spec.json>.
   if (testing && cliFolder && helperPath) {
     if (arg("live") === "on") installHooks(cliFolder, hookCommand(helperPath, socketPath), backups());
     if (arg("live") === "off") uninstallHooks(cliFolder, backups());
   }
   const dump = testing ? arg("dump") : undefined;
+  const runSpec = testing ? arg("run-pipeline") : undefined;
+  if (runSpec && cliFolder) setTimeout(() => { try { startPipeline(workspaces[0], JSON.parse(readFileSync(runSpec, "utf8"))); } catch { /* bad spec file */ } }, 3000);
 
   registerIpc();
   setupMenus();
@@ -557,5 +676,5 @@ app.on("activate", () => {
   if (!workspaces.length || uninstalling) return; // not started yet, or on the way out
   if (!workspaces.some((w) => w.win && !w.win.isDestroyed() && w.win.isVisible())) showWindow(workspaces[0]);
 });
-app.on("before-quit", () => { hookServer?.close(); });
+app.on("before-quit", () => { hookServer?.close(); for (const w of workspaces) w.pipeline?.stop(); });
 app.on("window-all-closed", () => { /* keep watching from the menu bar */ });

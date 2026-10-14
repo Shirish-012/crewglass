@@ -7,7 +7,7 @@ import { diffDesigns } from "./files";
 export function usePendingFiles() {
   const d = useDeck(useShallow((s) => ({
     saved: s.saved, agents: s.agents, mcps: s.mcps, links: s.links, orchestratorKey: s.orchestratorKey,
-    orchestratorPaused: s.orchestratorPaused, checks: s.checks,
+    orchestratorPaused: s.orchestratorPaused, checks: s.checks, handoff: s.handoff,
   })));
   return useMemo(() => diffDesigns(d.saved, d), [d]);
 }

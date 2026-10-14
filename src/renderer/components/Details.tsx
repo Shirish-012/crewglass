@@ -390,7 +390,7 @@ function ChatDetails() {
 }
 
 function FolderOverview() {
-  const s = useDeck(useShallow((st) => ({ folder: st.folder, sessions: st.sessions, liveMode: st.liveMode, liveActive: st.liveActive, orchestratorKey: st.orchestratorKey, agents: st.agents, orchestratorPaused: st.orchestratorPaused, real: st.mode === "real", loading: st.loading })));
+  const s = useDeck(useShallow((st) => ({ folder: st.folder, sessions: st.sessions, liveMode: st.liveMode, liveActive: st.liveActive, orchestratorKey: st.orchestratorKey, agents: st.agents, orchestratorPaused: st.orchestratorPaused, real: st.mode === "real", loading: st.loading, handoff: !!st.handoff })));
   const hints = useDeck(useShallow((st) => hintsFor(st)));
   const [dismissed, setDismissed] = useState<string[]>([]);
   const orch = s.orchestratorKey ? s.agents[s.orchestratorKey] : undefined;
@@ -404,7 +404,7 @@ function FolderOverview() {
             <Icon name={x.source === "vscode" ? "code" : "terminal"} size={14} />
             <div className="grow col" style={{ minWidth: 0 }}>
               <span className="truncate" title={x.name}>{x.name}{x.subfolder ? ` · /${x.subfolder}` : ""}</span>
-              {x.id !== "none" && <span className="muted truncate">{x.runsAs ? `runs as ${x.runsAs}` : "plain Claude (no agent)"}</span>}
+              {x.id !== "none" && <span className="muted truncate">{x.runsAs ? `runs as ${x.runsAs}` : "plain chat"}</span>}
             </div>
             <ModelChip model={x.model} effort={x.effort} />
           </div>
@@ -423,6 +423,13 @@ function FolderOverview() {
             : "Adds Stop, the failing-command breaker and permission alerts. Only this folder's settings.local.json is changed, after you see the diff."}
         </div>
         <div className="row"><Icon name="baton" size={14} /><span className="grow">Leads the team: {orch ? `${orch.name} (${modelWithEffort(orch.model, orch.effort)}) — new chats run as it` : "your Claude Code chat (default)"}</span></div>
+      </div>
+      <div className="card-box col" style={{ gap: 6 }}>
+        <div className="row"><b className="grow">Save &amp; continue later</b>
+          <button className="btn small" onClick={() => actions.toggleHandoff()}>{s.handoff ? "Remove" : "Add /handoff + /pickup"}</button></div>
+        <div className="muted small">{s.handoff
+          ? <>Claude also knows to follow Crewglass's 95% wrap-up request (<span className="mono">.claude/rules/crewglass-usage.md</span>). In Claude Code, <span className="mono">/handoff</span> saves where you are to <span className="mono">.claude/handoff.md</span> (kept out of git); <span className="mono">/clear</span>, then <span className="mono">/pickup</span> continues in a small, cheap chat. A new chat reminds you when a note is waiting.</>
+          : <>Two commands for long work: save progress to a note, start a fresh chat, continue from the note. Cheaper than one huge chat, whose cache Claude re-writes after every break.</>}</div>
       </div>
       {s.real && !s.loading.done && <div className="hint"><Icon name="info" size={15} /><span>Reading the last 30 days of Claude Code activity in this folder…</span></div>}
       {hints.filter((h) => !dismissed.includes(h)).map((h) => (

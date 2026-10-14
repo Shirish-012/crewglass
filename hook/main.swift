@@ -22,6 +22,57 @@ let input = FileHandle.standardInput.readDataToEndOfFile()
 guard !socketPath.isEmpty, input.count < 64 << 20,
       let obj = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] else { exit(0) }
 
+// ── Status line mode (Claude Code's `statusLine` command): one short line, printed every time ──
+// model · context % (from Claude Code) · today's spend vs your limit (from Crewglass). Without Crewglass: the first two.
+/// One question to Crewglass over its socket; its `print.statusText`, or nil (not running / slow / no answer).
+func askDeck(_ message: [String: Any]) -> String? {
+  guard let payload = try? JSONSerialization.data(withJSONObject: message) else { return nil }
+  let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+  if fd < 0 { return nil }
+  defer { close(fd) }
+  var addr = sockaddr_un()
+  addr.sun_family = sa_family_t(AF_UNIX)
+  let fits = socketPath.withCString { p -> Bool in
+    guard strlen(p) < MemoryLayout.size(ofValue: addr.sun_path) else { return false }
+    _ = withUnsafeMutablePointer(to: &addr.sun_path) { $0.withMemoryRebound(to: CChar.self, capacity: 104) { strcpy($0, p) } }
+    return true
+  }
+  if !fits { return nil }
+  let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+  if ok != 0 { return nil }
+  var tv = timeval(tv_sec: 0, tv_usec: 300_000)
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+  var out = payload
+  out.append(0x0A)
+  _ = out.withUnsafeBytes { write(fd, $0.baseAddress, out.count) }
+  var reply = Data()
+  var buf = [UInt8](repeating: 0, count: 4096)
+  while reply.count < 16384 {
+    let n = read(fd, &buf, buf.count)
+    if n <= 0 { break }
+    reply.append(contentsOf: buf[0..<n])
+    if reply.contains(0x0A) { break }
+  }
+  guard let answer = (try? JSONSerialization.jsonObject(with: reply)) as? [String: Any],
+        let text = (answer["print"] as? [String: Any])?["statusText"] as? String else { return nil }
+  let oneLine = text.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+  return oneLine.count > 240 ? String(oneLine.prefix(240)) : oneLine
+}
+
+if args.contains("--statusline") {
+  let sep = "\u{1B}[2m · \u{1B}[0m"
+  var line = "\u{1B}[36m" + (((obj["model"] as? [String: Any])?["display_name"] as? String) ?? "Claude") + "\u{1B}[0m"
+  if let p = (obj["context_window"] as? [String: Any])?["used_percentage"] as? NSNumber { line += sep + "\u{1B}[2mctx\u{1B}[0m \(Int(p.doubleValue.rounded()))%" }
+  var question: [String: Any] = ["event": "StatusLine"]
+  if let s = obj["session_id"] as? String { question["session_id"] = s }
+  if let c = obj["cwd"] as? String { question["cwd"] = c }
+  else if let c = (obj["workspace"] as? [String: Any])?["current_dir"] as? String { question["cwd"] = c }
+  if let text = askDeck(question), !text.isEmpty { line += sep + text }
+  FileHandle.standardOutput.write(Data(line.utf8))
+  exit(0)
+}
+
 let event = obj["hook_event_name"] as? String ?? ""
 let slowMarker = socketPath + ".slow"
 let toolName = obj["tool_name"] as? String ?? ""

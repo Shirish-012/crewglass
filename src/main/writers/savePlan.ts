@@ -5,6 +5,7 @@
 //   <folder>/.claude/settings.local.json · <folder>/.mcp.json · <folder>/.git/info/exclude · ~/.claude/agents/<name>.md
 // Existing agent files are edited in place with the yaml Document API, so unknown fields, comments and order survive.
 
+import { HANDOFF_COMMAND, HANDOFF_FILES, HANDOFF_NOTE, isOurHandoffFile, PICKUP_COMMAND, USAGE_RULES } from "@shared/handoff";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -62,7 +63,8 @@ export function guardPath(folder: string, path: string): string {
   if (inUserAgents && dirname(path) !== USER_AGENTS_DIR && dirname(path) !== userAgents) throw new Error(`refusing to write ${path}`);
   // New agent files use safe names; existing files keep theirs (still no path tricks).
   const agentFile = /^(\.claude\/agents|~\/\.claude\/agents)\/[A-Za-z0-9][A-Za-z0-9_.-]{0,80}\.md$/.test(rel);
-  const allowed = [TEAM_MAP, WORKFLOW, SETTINGS, MCP_JSON, ".git/info/exclude", LEGACY.teamMap].includes(rel) || agentFile;
+  const allowed = [TEAM_MAP, WORKFLOW, SETTINGS, MCP_JSON, ".git/info/exclude", HANDOFF_FILES.handoff, HANDOFF_FILES.pickup, HANDOFF_FILES.rules,
+    LEGACY.teamMap, LEGACY.usageRules].includes(rel) || agentFile;
   if (!allowed || rel.includes("..")) throw new Error(`refusing to write ${rel}`);
   // No writing through links anywhere along the way.
   for (let p = path; p !== dirname(p) && (p.startsWith(root) || p.startsWith(HOME)); p = dirname(p)) {
@@ -97,6 +99,7 @@ export function updateAgentText(text: string, a: Agent, tools: string[] | null):
   set("model", model?.alias ?? a.model);
   set("effort", model?.usesEffort ? a.effort : undefined);
   set("maxTurns", a.maxTurns);
+  set("omitClaudeMd", a.omitClaudeMd ? true : undefined);
   if (tools === null) set("tools", undefined);
   else {
     const cur = doc.get("tools");
@@ -168,6 +171,27 @@ export function planSave(folder: string, design: DesignPayload, agyEnv: AgyEnv |
       if (a.scope === "project" && !a.keepPrivate) warnings.push(`${a.name} is shared through git, but the agy bridge exists only on this Mac — someone who clones the repo gets an agent that can't reach agy. Consider "Keep private".`);
     }
   }
+  // ── /handoff and /pickup: Crewglass's own copies only (a command you wrote yourself is never touched) ──
+  const isRepo = existsSync(join(root, ".git")) && lstatSync(join(root, ".git")).isDirectory();
+  for (const [file, text] of [[HANDOFF_FILES.handoff, HANDOFF_COMMAND], [HANDOFF_FILES.pickup, PICKUP_COMMAND], [HANDOFF_FILES.rules, USAGE_RULES]] as const) {
+    const path = join(root, file);
+    const existing = readText(path);
+    const ours = existing === null || isOurHandoffFile(existing);
+    if (design.handoff === true && ours) add(path, text, true);
+    else if (design.handoff === false && existing !== null && isOurHandoffFile(existing)) add(path, null, true);
+  }
+  // The usage rules saved under the old name (Agent Deck) give way to the current file.
+  const legacyRules = readText(join(root, LEGACY.usageRules));
+  if (design.handoff !== undefined && legacyRules !== null && isOurHandoffFile(legacyRules)) add(join(root, LEGACY.usageRules), null, true);
+  if (isRepo && design.handoff !== undefined) {
+    // The note itself is your working state, not something to commit.
+    const lines: string[] = (pendingExclude ?? readText(join(root, ".git", "info", "exclude")) ?? "").split("\n");
+    const i = lines.findIndex((l, n) => l === `/${HANDOFF_NOTE}` && ourExcludeMark(lines[n - 1]));
+    if (design.handoff && i < 0 && !lines.includes(`/${HANDOFF_NOTE}`)) {
+      const text = lines.join("\n");
+      pendingExclude = `${text}${text && !text.endsWith("\n") ? "\n" : ""}${EXCLUDE_MARK}\n/${HANDOFF_NOTE}\n`;
+    } else if (!design.handoff && i > 0) { lines.splice(i - 1, 2); pendingExclude = lines.join("\n"); }
+  }
   if (pendingExclude !== null) add(join(root, ".git", "info", "exclude"), pendingExclude, false);
   for (const key of design.deletedKeys) {
     const file = key.replace(/^(project|user):/, "");
@@ -226,9 +250,10 @@ export function planSave(folder: string, design: DesignPayload, agyEnv: AgyEnv |
   // Live mode's own entries are brought up to date too (e.g. Phase 5's longer time limit so checks can finish).
   if (hookCommand) {
     const refreshed = refreshOurHooks(next, hookCommand);
-    if (JSON.stringify(refreshed.hooks) !== JSON.stringify(next.hooks)) {
+    if (JSON.stringify([refreshed.hooks, refreshed.statusLine]) !== JSON.stringify([next.hooks, next.statusLine])) {
       next.hooks = refreshed.hooks;
-      warnings.push("Live mode's entries in settings.local.json are updated: Claude now waits up to 6 minutes when an agent finishes, so its checks can run.");
+      if (refreshed.statusLine === undefined) delete next.statusLine; else next.statusLine = refreshed.statusLine;
+      warnings.push("Live mode's entries in settings.local.json are brought up to date (time limits for checks, and the status line if it's on in Settings).");
     }
   }
   if (JSON.stringify(next) !== JSON.stringify(settings)) add(settingsPath, pretty(next), false);

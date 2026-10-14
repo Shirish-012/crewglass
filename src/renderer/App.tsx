@@ -9,11 +9,12 @@ import { Details } from "./components/Details";
 import { LiveStrip } from "./components/LiveStrip";
 import { Inbox, Toasts } from "./components/Inbox";
 import { ReviewDialog } from "./components/ReviewDialog";
+import { RunDialog } from "./components/RunDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ContextMenu } from "./components/ContextMenu";
+import { Onboarding } from "./components/Onboarding";
 import { LiveModeDialog } from "./components/LiveModeDialog";
 import { focusSearch } from "./state/commands";
-import { pickFolder } from "./real/api";
 
 function useShortcuts() {
   useEffect(() => {
@@ -35,22 +36,6 @@ function useShortcuts() {
   }, []);
 }
 
-/** No folder yet: choose the one to watch (the prototype opens its demo folder). */
-function Welcome() {
-  const real = useDeck((s) => s.mode === "real");
-  return (
-    <div className="onboard">
-      <div className="onboard-card" role="dialog" aria-label="Choose a folder">
-        <div className="onboard-body" style={{ minHeight: 0 }}>
-          <h1>Which folder should Crewglass watch?</h1>
-          <div className="ink2">Crewglass shows Claude Code activity in <b>this folder and its subfolders only</b>. Everything else on your Mac is ignored.</div>
-          <div><button className="btn primary" onClick={() => (real ? void pickFolder() : actions.skipOnboarding())}>{real ? "Choose a folder…" : "Open the demo folder"}</button></div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function App() {
   const onboarded = useDeck((s) => s.onboarded);
   const mode = useDeck((s) => s.mode);
@@ -61,7 +46,7 @@ export function App() {
     return () => clearInterval(t);
   }, [onboarded, mode]);
 
-  if (!onboarded) return <><Welcome /><Toasts /></>;
+  if (!onboarded) return <><Onboarding /><Toasts /></>;
   return (
     <ReactFlowProvider>
       <div className="app">
@@ -75,6 +60,7 @@ export function App() {
       </div>
       <Inbox />
       <ReviewDialog />
+      <RunDialog />
       <SettingsDialog />
       <ContextMenu />
       <LiveModeDialog />

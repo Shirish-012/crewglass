@@ -5,7 +5,7 @@
 import type { Agent, Link, McpServer } from "@shared/types";
 import type { Snapshot } from "@shared/ipc";
 import type { Design } from "../state/files";
-import { designOf, useDeck } from "../state/store";
+import { actions, designOf, useDeck } from "../state/store";
 import { pickFolder } from "./api";
 import { editCommand, focusSearch } from "../state/commands";
 import { tidyPositions } from "../state/layout";
@@ -21,7 +21,7 @@ function loadPositions(folder: string): Record<string, { x: number; y: number }>
 
 /** Keep your unsaved edits, but refresh live numbers and add anything newly seen. */
 function mergeLive(cur: Design, snap: Design, savedBefore: Design): Design {
-  const live = (a: Agent, s?: Agent): Agent => (s ? { ...a, status: s.status, parallel: s.parallel, tokens: s.tokens, calls: s.calls, skillsUsed: s.skillsUsed,
+  const live = (a: Agent, s?: Agent): Agent => (s ? { ...a, status: s.status, parallel: s.parallel, tokens: s.tokens, usdToday: s.usdToday, calls: s.calls, skillsUsed: s.skillsUsed,
     liveNow: s.liveNow, actualModel: s.actualModel, actualEffort: s.actualEffort, sameName: s.sameName, gemini: s.gemini } : a);
   const agents = Object.fromEntries(Object.entries(cur.agents).map(([k, a]) => [k, live(a, snap.agents[k])]));
   for (const [k, a] of Object.entries(snap.agents)) if (!agents[k] && !savedBefore.agents[k]) agents[k] = a;
@@ -43,6 +43,7 @@ function apply(snap: Snapshot) {
     orchestratorKey: snap.orchestratorKey,
     orchestratorPaused: snap.orchestratorPaused,
     checks: snap.checks,
+    handoff: snap.handoff,
   };
   const folderChanged = snap.folder !== lastFolder;
   const dirty = !folderChanged && s.summaries.length > 0;
@@ -66,6 +67,8 @@ function apply(snap: Snapshot) {
     inbox: snap.inbox,
     todayTokens: snap.todayTokens,
     todayCache: snap.todayCache,
+    todayUsd: snap.todayUsd,
+    todayUsdByModel: snap.todayUsdByModel,
     limits: snap.limits,
     sourceRepo: snap.sourceRepo,
     claudeVersion: snap.claudeVersion,
@@ -78,6 +81,12 @@ function apply(snap: Snapshot) {
     stopFlag: snap.sessions.some((x) => x.status === "stopping" || x.status === "stopped"),
   });
   lastFolder = snap.folder;
+  // First run: the wizard's team preset, once this folder's agents have been read (it only adds what's missing).
+  const pending = useDeck.getState().pendingPreset;
+  if (pending && snap.folder && snap.loading.done) {
+    useDeck.setState({ pendingPreset: null });
+    actions.finishOnboarding(pending);
+  }
   // Cards that appear get a place; cards you've moved keep theirs.
   const st = useDeck.getState();
   const keys = [...st.sessions.map((x) => `session:${x.id}`), ...Object.keys(st.agents), ...Object.keys(st.mcps)];
@@ -100,12 +109,14 @@ export async function connectReal() {
   api.onSnapshot(apply);
   api.onCommand((c) => {
     if (c === "open-inbox") useDeck.setState({ inboxOpen: true });
+    if (c === "open-settings") useDeck.setState({ settingsOpen: true });
     if (c === "open-uninstall") useDeck.setState({ uninstallOpen: true });
     if (c === "choose-folder") void pickFolder();
     if (c === "edit-undo") editCommand("undo");
     if (c === "edit-redo") editCommand("redo");
     if (c === "find") focusSearch();
   });
+  api.onPipeline((p) => useDeck.setState({ pipeline: p }));
   // Remember where you put the cards, per folder (in Crewglass's own storage, not the repo).
   useDeck.subscribe((st, prev) => {
     if (st.positions !== prev.positions && st.folder) {

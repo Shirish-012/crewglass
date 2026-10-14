@@ -27,24 +27,27 @@ export interface Settings {
   longTaskMin: number;
   /** Live mode: a one-line note at the start of each Claude Code chat saying which agent it runs as. */
   chatNotice: boolean;
+  /** Live mode: Claude Code's status line shows model · context · today's spend vs your limit. */
+  statusLine: boolean;
   /** The failing-command breaker pauses a command after this many failures in a row (2–5). */
   breakerThreshold: number;
   /** Crewglass's own source code, for the "Unknown fields" box (default: where it was built). */
   sourceRepo: string | null;
   /** How long the History tab keeps each session's numbers (Claude's own transcripts only go back 30 days). */
   historyDays: number;
-  /** How tokens are counted: 2 = input + output (cache writes no longer included). Limits saved before are reset once. */
+  /** How limits are measured: 3 = API-equivalent US dollars (2 = input + output tokens). Older limits are reset once. */
   tokenCount?: number;
 }
 
-/** Tokens are input + output since this version (cache writes used to be counted, which made usage look inflated). */
-export const TOKEN_COUNT = 2;
+/** Limits are in API-equivalent dollars since this version: they weigh cheap cache reads and costly cache writes
+ *  honestly (2 = input + output tokens; before that, raw tokens with cache writes). */
+export const TOKEN_COUNT = 3;
 
 export const DEFAULT_POPUPS: Record<PopupKind, boolean> = { permission: true, paused: true, approval: true, failed: true, finished: true, limit: true };
 
 const DEFAULTS: Settings = {
-  folder: null, recentFolders: [], openFolders: [], limits: { session: 1_000_000, day: 1_500_000 }, dismissedFormat: null, hookFolders: [], agyFolders: [],
-  geminiModels: [], launchAtLogin: true, popups: DEFAULT_POPUPS, permissionPopupSec: 20, notifyEveryFinish: true, longTaskMin: 2, chatNotice: true, breakerThreshold: 3, sourceRepo: null,
+  folder: null, recentFolders: [], openFolders: [], limits: { session: 25, day: 50 }, dismissedFormat: null, hookFolders: [], agyFolders: [],
+  geminiModels: [], launchAtLogin: true, popups: DEFAULT_POPUPS, permissionPopupSec: 20, notifyEveryFinish: true, longTaskMin: 2, chatNotice: true, statusLine: true, breakerThreshold: 3, sourceRepo: null,
   historyDays: 90, tokenCount: TOKEN_COUNT,
 };
 
@@ -56,6 +59,7 @@ export function cleanSettingsPatch(p: unknown): Partial<Settings> {
   if (typeof o.launchAtLogin === "boolean") out.launchAtLogin = o.launchAtLogin;
   if (typeof o.notifyEveryFinish === "boolean") out.notifyEveryFinish = o.notifyEveryFinish;
   if (typeof o.chatNotice === "boolean") out.chatNotice = o.chatNotice;
+  if (typeof o.statusLine === "boolean") out.statusLine = o.statusLine;
   if (o.popups && typeof o.popups === "object") {
     const pp = { ...DEFAULT_POPUPS };
     for (const k of Object.keys(DEFAULT_POPUPS) as PopupKind[]) { const v = (o.popups as Record<string, unknown>)[k]; if (typeof v === "boolean") pp[k] = v; }
@@ -66,7 +70,7 @@ export function cleanSettingsPatch(p: unknown): Partial<Settings> {
   const th = int(o.breakerThreshold, 2, 5); if (th !== undefined) out.breakerThreshold = th;
   const hd = int(o.historyDays, 30, 365); if (hd !== undefined) out.historyDays = hd;
   const l = o.limits as { session?: unknown; day?: unknown } | undefined;
-  const lim = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n >= 10_000 && n <= 1e10 ? Math.round(n) : undefined);
+  const lim = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n >= 0.5 && n <= 100_000 ? Math.round(n * 100) / 100 : undefined); // US dollars
   if (l && lim(l.session) !== undefined && lim(l.day) !== undefined) out.limits = { session: lim(l.session)!, day: lim(l.day)! };
   return out;
 }
@@ -79,7 +83,7 @@ export class SettingsStore {
     let loaded: Partial<Settings> = {};
     try { loaded = JSON.parse(readFileSync(this.path, "utf8")) as Partial<Settings>; } catch { /* first run */ }
     this.data = { ...DEFAULTS, ...loaded, limits: { ...DEFAULTS.limits, ...(loaded.limits ?? {}) }, popups: { ...DEFAULT_POPUPS, ...(loaded.popups ?? {}) } };
-    // Limits saved when tokens still included cache writes are ~5–20× too high for the new count: start them again.
+    // Limits saved in tokens mean nothing in dollars: start them again (once).
     if (Object.keys(loaded).length && loaded.tokenCount !== TOKEN_COUNT) {
       this.limitsReset = true;
       this.update({ limits: { ...DEFAULTS.limits }, tokenCount: TOKEN_COUNT });

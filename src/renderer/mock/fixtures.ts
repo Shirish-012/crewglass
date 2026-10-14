@@ -161,15 +161,41 @@ export interface RoleTemplate {
   maxTurns: number;
   toolAccess: "inherit" | "connected";
   builtinTools?: string[];
+  omitClaudeMd?: boolean;
 }
 
+// Each role returns a SHORT summary: it's all that goes back into the main chat, so the main chat stays small.
+// Read-only roles with self-contained instructions start without CLAUDE.md (omitClaudeMd), so they start cheaper.
+const SHORT = (fmt: string, words: number) => `\n\n## What to return (keep it short: it's all the main chat will see)\n${fmt}\nAt most ~${words} words. No code dumps: the main chat can read the files.`;
 export const ROLE_TEMPLATES: RoleTemplate[] = [
-  { id: "planner", name: "planner", role: "Use when a feature needs a step-by-step plan before any code is written.", instructions: "Write a short, numbered plan with acceptance criteria for each step. Do not write code.", model: "opus", effort: "high", maxTurns: 20, toolAccess: "inherit" },
-  { id: "coder", name: "coder", role: "Use when code must be written or changed for a planned task.", instructions: "Implement exactly the task you are given. Keep changes small. Run the tests before you finish.", model: "opus", effort: "medium", maxTurns: 40, toolAccess: "inherit" },
-  { id: "reviewer", name: "reviewer", role: "Use after code changes to review them. Answer VERDICT: PASS or VERDICT: FAIL + reasons.", instructions: "Review the diff for bugs, security issues and missing tests. End with VERDICT: PASS or VERDICT: FAIL followed by reasons.", model: "sonnet", effort: "high", maxTurns: 15, toolAccess: "connected", builtinTools: ["Read", "Grep", "Glob"] },
-  { id: "tester", name: "tester", role: "Use to write and run tests for a change and report exactly what failed.", instructions: "Write focused tests for the change, run them, and report failures with file and line.", model: "sonnet", effort: "medium", maxTurns: 25, toolAccess: "inherit" },
-  { id: "researcher", name: "researcher", role: "Use to research a question in the codebase or docs and summarize the answer.", instructions: "Search, read, and answer with sources. Do not edit files.", model: "sonnet", effort: "medium", maxTurns: 20, toolAccess: "connected", builtinTools: ["Read", "Grep", "Glob", "WebFetch"] },
-  { id: "docs-writer", name: "docs-writer", role: "Use to write or update README and docs after a change.", instructions: "Write clear, short docs that match the code.", model: "sonnet", effort: "low", maxTurns: 15, toolAccess: "inherit" },
+  { id: "explorer", name: "explorer", role: "Use to find where or how something works in the codebase (where is X defined, what calls Y). Read-only; use instead of reading many files in the main chat.",
+    instructions: "You only read. Search first (Grep/Glob), then open only the relevant parts of files. Stop as soon as you can answer confidently." +
+      SHORT("- **Answer:** 1–3 sentences\n- **Where:** key locations as `path:line`, one per line, with a few words of context\n- **Unsure about:** anything you couldn't confirm (or \"nothing\")", 120),
+    model: "haiku", maxTurns: 15, toolAccess: "connected", builtinTools: ["Read", "Grep", "Glob"], omitClaudeMd: true },
+  { id: "planner", name: "planner", role: "Use when a feature needs a step-by-step plan before any code is written.",
+    instructions: "Write a short, numbered plan with acceptance criteria for each step. Do not write code." +
+      SHORT("A numbered plan: each step one line, then `Done when:` with a checkable criterion. End with risks or open questions (or \"none\").", 200),
+    model: "opus", effort: "high", maxTurns: 20, toolAccess: "inherit" },
+  { id: "coder", name: "coder", role: "Use when code must be written or changed across one or more files (feature, refactor, bug fix). Give it the goal, the files, the constraints and how to check the result.",
+    instructions: "Implement exactly the task you are given. Read only the files you need (search before opening whole files), make small focused edits that match the surrounding style, then verify with the tests or the command in the brief. Don't widen the scope: mention problems outside the brief instead of fixing them." +
+      SHORT("- **Done:** one line per file (`path`: what and why)\n- **Verified:** the command you ran and its result\n- **Open issues:** anything unfinished or risky (or \"none\")", 150),
+    model: "opus", effort: "medium", maxTurns: 40, toolAccess: "inherit" },
+  { id: "reviewer", name: "reviewer", role: "Use after code changes or before a commit to review them. Answers VERDICT: PASS or VERDICT: FAIL + reasons. Never edits.",
+    instructions: "Review the diff (if no target was given: `git diff` and `git diff --staged`) for wrong logic, unhandled errors and edge cases, security problems, broken contracts and missing tests. Read enough surrounding code to judge each change. Only report issues you can point to; mark anything uncertain as unsure. Never edit files." +
+      SHORT("A numbered list, most severe first, one line each: `[high|medium|low] path:line: problem → suggested fix`. End with `VERDICT: PASS` or `VERDICT: FAIL` followed by the reasons.", 200),
+    model: "sonnet", effort: "high", maxTurns: 15, toolAccess: "connected", builtinTools: ["Read", "Grep", "Glob", "Bash"], omitClaudeMd: true },
+  { id: "tester", name: "tester", role: "Use to run tests (or a given test command), find out why they fail, and add missing tests. Fixes test files only, never app code.",
+    instructions: "Find the test command (package.json scripts, Makefile, the brief…) and run the narrowest set that covers the task. Filter long output (`| tail -50`, `grep -E \"FAIL|Error\"`). For each failure decide whether the code or the test is wrong: you may edit test files; report code bugs instead of fixing them. Re-run to confirm." +
+      SHORT("- **Command:** what you ran\n- **Result:** X passed / Y failed\n- **Failures:** one line each: `test: cause (code bug | test bug | flaky) → what you did`\n- **Changed:** test files you edited (or \"none\")", 150),
+    model: "haiku", maxTurns: 25, toolAccess: "connected", builtinTools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] },
+  { id: "researcher", name: "researcher", role: "Use to research a question in the codebase or docs and summarize the answer with sources.",
+    instructions: "Search, read, and answer with sources. Do not edit files." +
+      SHORT("- **Answer:** a short paragraph\n- **Sources:** `path:line` or links, one per line\n- **Unsure about:** what you couldn't confirm", 200),
+    model: "sonnet", effort: "medium", maxTurns: 20, toolAccess: "connected", builtinTools: ["Read", "Grep", "Glob", "WebFetch"], omitClaudeMd: true },
+  { id: "docs-writer", name: "docs-writer", role: "Use to write or update README and docs after a change.",
+    instructions: "Write clear, short docs that match the code and this project's conventions." +
+      SHORT("- **Updated:** one line per file\n- **Check:** anything the docs now promise that you couldn't verify", 100),
+    model: "sonnet", effort: "low", maxTurns: 15, toolAccess: "inherit" },
 ];
 
 export const TEAM_PRESETS = [

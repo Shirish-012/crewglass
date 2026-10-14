@@ -8,6 +8,7 @@
 //  • Only field names, token numbers, model ids, tool names and short targets are kept. Text, thinking,
 //    prompts and tool output are never stored.
 
+import { costOf } from "@shared/pricing";
 import { createHash } from "node:crypto";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -26,6 +27,8 @@ export const KNOWN_ENTRY_TYPES = new Set([
 export const KNOWN_USAGE_KEYS = new Set([
   "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens", "output_tokens_details",
   "server_tool_use", "service_tier", "cache_creation", "inference_geo", "iterations", "speed",
+  // Claude Code 2.1.288: refusal-fallback credit (null unless a credit was redeemed; the token numbers already reflect it).
+  "fallback_credit",
 ]);
 
 const WINDOW_MS = 30 * 24 * 3600 * 1000;
@@ -33,6 +36,17 @@ const MINUTE = 60_000;
 
 export interface Usage { input: number; cacheWrite: number; cacheRead: number; output: number }
 const ZERO: Usage = { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 };
+/** One reply in API-equivalent dollars (its own model, 5-minute vs 1-hour cache writes, fast mode). */
+function replyUsd(model: string, raw: Record<string, unknown>): number {
+  const cc = (raw.cache_creation ?? {}) as Record<string, unknown>;
+  const has = typeof cc.ephemeral_5m_input_tokens === "number" || typeof cc.ephemeral_1h_input_tokens === "number";
+  // No split recorded: price it as the 1-hour cache (the dearer one), so spend is never under-counted.
+  return costOf(model, {
+    input: num(raw.input_tokens), output: num(raw.output_tokens), cacheRead: num(raw.cache_read_input_tokens),
+    write5m: has ? num(cc.ephemeral_5m_input_tokens) : 0, write1h: has ? num(cc.ephemeral_1h_input_tokens) : num(raw.cache_creation_input_tokens),
+    fast: raw.speed === "fast",
+  });
+}
 /** "Tokens" for limits and charts: input + output — the same Input and Output lines Claude Code's /cost shows.
  *  Cache writes (Claude re-saving the conversation, e.g. after its cache expired) and cache reads are tracked
  *  separately: in a long chat they dwarf everything else, and counting them made usage look inflated. */
@@ -46,6 +60,9 @@ export interface SessionAgg {
   tokens: number;
   /** Of `tokens`, the part from today (local time). */
   tokensToday: number;
+  /** API-equivalent dollars, all of the session (with its subagents) and today's part. */
+  usd: number;
+  usdToday: number;
   cacheRead: number;
   cacheWrite: number;
   models: Set<string>;
@@ -63,6 +80,7 @@ export interface SessionAgg {
 export interface AgentAgg {
   type: string;
   tokensToday: number;
+  usdToday: number;
   callsToday: number;
   lastTs: number;
   lastModel: string | null;
@@ -94,7 +112,7 @@ interface FileState {
   confirmed: boolean;
   /** Main transcript whose cwd turned out to be outside the folder (a look-alike directory name): never read again. */
   rejected: boolean;
-  usageById: Map<string, { u: Usage; model: string; minute: number }>;
+  usageById: Map<string, { u: Usage; model: string; minute: number; usd: number }>;
   pendingTools: Map<string, { at: number; activity?: ActivityEvent; bashSig?: string; agy?: boolean; mcp?: string }>;
   /** Subagent runs: agy calls made, and when it gave a final answer (a reply with no tool calls). */
   agyCalls: number;
@@ -139,6 +157,9 @@ export class FolderTranscripts {
   todayTokens = 0;
   /** Today's cache traffic in this folder, shown next to the tokens (not counted in them). */
   readonly todayCache = { write: 0, read: 0 };
+  /** Today's API-equivalent dollars in this folder, in total and by model id. */
+  todayUsd = 0;
+  todayUsdByModel: Record<string, number> = {};
   agyTokensToday = 0;
   agyCallsToday = 0;
   /** Local midnight the "today" counters belong to. Crewglass runs for days (launch at login), so they start
@@ -154,10 +175,10 @@ export class FolderTranscripts {
     const d = new Date(now); d.setHours(0, 0, 0, 0);
     if (d.getTime() === this.dayStart) return;
     this.dayStart = d.getTime();
-    this.todayTokens = 0; this.todayCache.write = 0; this.todayCache.read = 0;
+    this.todayTokens = 0; this.todayCache.write = 0; this.todayCache.read = 0; this.todayUsd = 0; this.todayUsdByModel = {};
     this.agyTokensToday = 0; this.agyCallsToday = 0;
-    for (const s of this.sessions.values()) s.tokensToday = 0;
-    for (const a of this.agents.values()) { a.tokensToday = 0; a.callsToday = 0; }
+    for (const s of this.sessions.values()) { s.tokensToday = 0; s.usdToday = 0; }
+    for (const a of this.agents.values()) { a.tokensToday = 0; a.callsToday = 0; a.usdToday = 0; }
     for (const g of this.agy.values()) { g.tokensToday = 0; g.callsToday = 0; }
   }
 
@@ -303,7 +324,7 @@ export class FolderTranscripts {
   private session(id: string): SessionAgg {
     let s = this.sessions.get(id);
     if (!s) {
-      s = { sessionId: id, entrypoint: "", firstTs: 0, lastTs: 0, tokens: 0, tokensToday: 0, cacheRead: 0, cacheWrite: 0, models: new Set(), agentsUsed: new Set(), mcpsUsed: new Set(),
+      s = { sessionId: id, entrypoint: "", firstTs: 0, lastTs: 0, tokens: 0, tokensToday: 0, usd: 0, usdToday: 0, cacheRead: 0, cacheWrite: 0, models: new Set(), agentsUsed: new Set(), mcpsUsed: new Set(),
         failures: 0, agentSetting: null, lastModel: null, lastEffort: undefined, contextTokens: 0, skills: new Set(), lastAction: null };
       this.sessions.set(id, s);
     }
@@ -313,7 +334,7 @@ export class FolderTranscripts {
   private agent(type: string): AgentAgg {
     let a = this.agents.get(type);
     if (!a) {
-      a = { type, tokensToday: 0, callsToday: 0, lastTs: 0, lastModel: null, lastEffort: undefined, skills: new Set(), lastAction: null };
+      a = { type, tokensToday: 0, usdToday: 0, callsToday: 0, lastTs: 0, lastModel: null, lastEffort: undefined, skills: new Set(), lastAction: null };
       this.agents.set(type, a);
     }
     return a;
@@ -355,8 +376,11 @@ export class FolderTranscripts {
       const delta = billable(u) - (prev ? billable(prev.u) : 0);
       const deltaRead = u.cacheRead - (prev?.u ?? ZERO).cacheRead;
       const deltaWrite = u.cacheWrite - (prev?.u ?? ZERO).cacheWrite;
-      f.usageById.set(id, { u, model, minute });
+      const usd = replyUsd(model, usageRaw);
+      const deltaUsd = usd - (prev?.usd ?? 0);
+      f.usageById.set(id, { u, model, minute, usd });
       session.tokens += delta;
+      session.usd += deltaUsd;
       session.cacheRead += deltaRead;
       session.cacheWrite += deltaWrite;
       const bucket = this.minute(minute * MINUTE);
@@ -366,8 +390,11 @@ export class FolderTranscripts {
         session.tokensToday += delta;
         this.todayCache.write += deltaWrite;
         this.todayCache.read += deltaRead;
+        session.usdToday += deltaUsd;
+        this.todayUsd += deltaUsd;
+        this.todayUsdByModel[model] = (this.todayUsdByModel[model] ?? 0) + deltaUsd;
       }
-      if (!f.isMain && f.agentType && at >= startOfToday()) this.agent(f.agentType).tokensToday += delta;
+      if (!f.isMain && f.agentType && at >= startOfToday()) { const a = this.agent(f.agentType); a.tokensToday += delta; a.usdToday += deltaUsd; }
       if (f.isMain && e.isSidechain !== true) session.contextTokens = u.input + u.cacheRead + u.cacheWrite;
     }
     if (model) {

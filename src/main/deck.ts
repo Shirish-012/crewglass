@@ -1,11 +1,12 @@
 // Deck: watches ONE folder and turns everything the readers find into the Snapshot the UI shows.
 // It never writes: saving goes through writers/savePlan.ts, and only after you review the exact diff.
 
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { Agent, HistoryRow, Link, McpServer, Session } from "@shared/types";
 import type { SeriesPoint, Snapshot } from "@shared/ipc";
-import { chatStartEffort, findModel, formatTokens, isCostly, modelWithEffort, runDiffers } from "@shared/models";
+import { chatStartEffort, findModel, isCostly, modelWithEffort, runDiffers } from "@shared/models";
+import { formatUsd } from "@shared/pricing";
 import { Scope, realPath } from "./scope";
 import { readSessions, sourceOf, statusOf, type LiveSession } from "./sources/claudeSessions";
 import { openWorkspaceFolders } from "./sources/ideLocks";
@@ -16,8 +17,9 @@ import { FolderTranscripts } from "./sources/transcripts";
 import { detectFormatIssues, issuesSignature, TESTED_CLAUDE_VERSION } from "./formatWatch";
 import { Alerts, type Notify } from "./alerts";
 import type { SettingsStore } from "./settings";
-import { LiveEngine, type Answer, type DirectRules, type HookMsg, type Waiting } from "./live/liveEngine";
+import { LiveEngine, Waiting, type Answer, type DirectRules, type HookMsg } from "./live/liveEngine";
 import { isInstalled } from "./live/hookInstaller";
+import { HANDOFF_FILES, isOurHandoffFile } from "@shared/handoff";
 import { CHAT_KEY, CHAT_NAME, parseTeamMap, TEAM_MAP_FILES, type TeamMapData } from "@shared/teamMap";
 import { chatNotice } from "./live/chatNotice";
 import { checksFor, readFolderData } from "./folderData";
@@ -101,7 +103,16 @@ export class Deck {
 
   /** A hook event from the helper (Live mode). Returns what the helper should print back to Claude Code. */
   handleHook(m: HookMsg): Answer | Waiting {
+    if (m.event === "StatusLine") return this.statusLine(m);
     const answer = this.engine.handle(m);
+    // Near the limit (95%): ask the main chat, once a day, to finish its step and write a handoff note.
+    if ((m.event === "PostToolUse" || m.event === "PostToolUseFailure") && !m.agent_id && !(answer instanceof Waiting)) {
+      const note = this.wrapUpNote(m.session_id);
+      if (note && answer.print?.continue !== false) {
+        const prev = (answer.print?.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext;
+        return { print: { hookSpecificOutput: { hookEventName: m.event, additionalContext: prev ? `${prev}\n\n${note}` : note } } };
+      }
+    }
     // A new chat: a one-line notice for you saying which agent it runs as (never read by Claude).
     if (m.event === "SessionStart" && m.source !== "compact" && this.settings.data.chatNotice && this.scope?.contains(m.cwd)) {
       const note = this.chatNoticeFor(m.agent_type);
@@ -110,10 +121,58 @@ export class Deck {
     return answer;
   }
 
+  /** Claude Code's status line asks for Crewglass's part: today's spend vs the limit, this session, what it runs as,
+   *  and whether a handoff note is waiting. (Model and context come from Claude Code itself.) */
+  private statusLine(m: HookMsg): Answer {
+    if (!this.scope || !this.transcripts || !this.scope.contains(m.cwd)) return {};
+    const t = this.transcripts;
+    const day = this.settings.data.limits.day;
+    const ratio = t.todayUsd / day;
+    const blocks = Math.min(5, Math.max(0, Math.round(ratio * 5)));
+    const tone = ratio >= 0.95 ? "\x1b[31m" : ratio >= 0.8 ? "\x1b[33m" : "\x1b[32m";
+    const dim = (x: string) => `\x1b[2m${x}\x1b[0m`;
+    const s = m.session_id ? t.sessions.get(m.session_id) : undefined;
+    const parts = [
+      `${dim("session")} ${formatUsd(s?.usd ?? 0)}`,
+      `${dim("today")} ${tone}${formatUsd(t.todayUsd)}/${formatUsd(day)} ${"▰".repeat(blocks)}${"▱".repeat(5 - blocks)} ${Math.round(ratio * 100)}%\x1b[0m`,
+    ];
+    if (s?.agentSetting) parts.push(`${dim("as")} ${s.agentSetting.replace(/[^\w.-]/g, "").slice(0, 40)}`);
+    if (existsSync(join(this.scope.folder, ".claude", "handoff.md"))) parts.push("\x1b[33mhandoff ✎\x1b[0m");
+    return { print: { statusText: parts.join(dim(" · ")) } };
+  }
+
+  /** Crewglass's /handoff command is in the folder (checked when the folder files are re-read). */
+  private hasHandoffCommands(): boolean {
+    if (!this.scope) return false;
+    try { return isOurHandoffFile(readFileSync(join(this.scope.folder, HANDOFF_FILES.handoff), "utf8")); } catch { return false; }
+  }
+
   /** The folder's team map (under the current name, else the old one), or null if none is saved. */
   private teamMapText(): string | null {
     for (const f of TEAM_MAP_FILES) { try { return readFileSync(join(this.scope!.folder, f), "utf8"); } catch { /* try the next */ } }
     return null;
+  }
+
+  /** Sessions already asked to wrap up today (session id → day). */
+  private wrappedUp = new Map<string, string>();
+
+  /** The 95% wrap-up request, once per chat per day — or null. Dollars from Claude Code's own records. */
+  wrapUpNote(sessionId: string | undefined, now = Date.now()): string | null {
+    if (!sessionId || !this.transcripts) return null;
+    const day = new Date(now).toDateString();
+    if (this.wrappedUp.get(sessionId) === day) return null;
+    const l = this.settings.data.limits;
+    const session = this.transcripts.sessions.get(sessionId)?.usd ?? 0;
+    const today = this.transcripts.todayUsd;
+    const ratio = Math.max(session / l.session, today / l.day);
+    if (ratio < 0.95) return null;
+    this.wrappedUp.set(sessionId, day);
+    const which = session / l.session >= today / l.day ? `this session's ${formatUsd(l.session)} limit (${formatUsd(session)} used)` : `today's ${formatUsd(l.day)} limit for this folder (${formatUsd(today)} used)`;
+    this.alerts.note(`wrapup:${sessionId}:${day}`, "Claude was asked to wrap up", `${Math.round(ratio * 100)}% of ${which}, API-equivalent. Claude was asked to finish its current step and write .claude/handoff.md. Nothing is blocked; raise the limit in Settings to keep going.`);
+    return `USAGE NOTICE (from Crewglass): ${Math.round(ratio * 100)}% of ${which}, at Claude API prices, is used. ` +
+      "Finish only the step you are on and don't start new work. Then write a handoff note to .claude/handoff.md " +
+      "(sections: Goal, Done, In progress, Next steps, Key files, Decisions & gotchas, How to resume) so the work can continue " +
+      "later in a fresh chat with /pickup, and tell the user the limit is nearly reached. Nothing is blocked; the user decides.";
   }
 
   private chatNoticeFor(agentType: string | undefined): string | null {
@@ -122,7 +181,9 @@ export class Deck {
     const text = this.teamMapText();
     if (text) team = parseTeamMap(text);
     const file = agentType ? [...this.files.project, ...this.files.user].find((f) => f.agent.name === agentType && f.agent.sameName?.usedByClaude !== false) : undefined;
-    return chatNotice({ agentType, agent: file ? { model: file.agent.model } : null, startEffort: this.config?.effortLevel ?? null, team });
+    let handoff: string | null = null;
+    try { handoff = new Date(statSync(join(this.scope.folder, ".claude", "handoff.md")).mtimeMs).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); } catch { /* none */ }
+    return chatNotice({ agentType, agent: file ? { model: file.agent.model } : null, startEffort: this.config?.effortLevel ?? null, team, handoff });
   }
 
   stop(target: string) {
@@ -135,12 +196,24 @@ export class Deck {
   /** Tokens are counted differently now, so the saved limits were reset once: say so in the inbox. */
   noteLimitsReset() {
     const l = this.settings.data.limits;
-    this.alerts.note("limits-reset", "Token limits were reset for the new count",
-      `Tokens now mean input + output, like Claude Code's /cost — cache writes aren't counted any more (they made usage look inflated). Your limits are now ${formatTokens(l.session)} per session and ${formatTokens(l.day)} per day; change them in Settings.`);
+    this.alerts.note("limits-reset", "Limits are now in dollars",
+      `Usage limits are measured in API-equivalent dollars (what the usage would cost at Claude API prices), so cache reads and writes count at their real weight. Your limits are now ${formatUsd(l.session)} per session and ${formatUsd(l.day)} per day in this folder; change them in Settings.`);
+  }
+
+  /** Settings changed: safeguards pick up the new values from the next event. */
+  applySettings() {
+    this.engine.setOptions({ threshold: this.settings.data.breakerThreshold, permissionPopupMs: this.settings.data.permissionPopupSec * 1000 });
   }
 
   /** Does this watcher know the session (for routing a hook event that carries no folder)? */
   knowsSession(id: string): boolean { return this.engine.sessions.has(id) || this.live.some((l) => l.sessionId === id); }
+
+  /** Sessions started by Run pipeline: shown as "Pipeline", and Live mode leaves their checks to the pipeline. */
+  private pipelineSessions = new Set<string>();
+  markPipelineSession(id: string) {
+    this.pipelineSessions.add(id);
+    this.engine.markPipeline(id);
+  }
 
   setFolder(folder: string | null) {
     this.engine = this.newEngine();
@@ -155,6 +228,7 @@ export class Deck {
     this.sessionFields = [];
     this.kinds = [];
     this.statuses = [];
+    this.pipelineSessions.clear();
     this.storedHistory = folder && this.userData ? readHistory(this.userData, this.scope!.folder) : [];
     this.tick = 0;
   }
@@ -206,8 +280,8 @@ export class Deck {
     }
     this.alerts.evaluate({
       folderName: basename(this.scope.folder),
-      sessions: this.buildSessions().filter((s) => s.id !== "none").map((s) => ({ id: s.id, name: s.name, status: s.status, tokens: s.tokens, contextPct: this.contextPct(s), source: s.source })),
-      todayTokens: this.transcripts.todayTokens,
+      sessions: this.buildSessions().filter((s) => s.id !== "none").map((s) => ({ id: s.id, name: s.name, status: s.status, usd: s.usd ?? 0, contextPct: this.contextPct(s), source: s.source })),
+      todayUsd: this.transcripts.todayUsd,
       limits: this.settings.data.limits,
       // With Live mode on, the engine pauses failing commands itself; the transcript-based warning is for watch-only.
       failStreaks: this.liveInstalled ? [] : [...this.transcripts.failStreaks.values()],
@@ -231,9 +305,9 @@ export class Deck {
       const agg = t.sessions.get(l.sessionId);
       const liveStatus = this.engine.statusOf(l.sessionId);
       return {
-        id: l.sessionId, name: l.name, source: sourceOf(l.entrypoint, l.kind), subfolder: l.subfolder || undefined,
+        id: l.sessionId, name: l.name, source: this.pipelineSessions.has(l.sessionId) ? "pipeline" : sourceOf(l.entrypoint, l.kind), subfolder: l.subfolder || undefined,
         status: liveStatus === "waiting" || liveStatus === "stopping" || liveStatus === "stopped" ? liveStatus : statusOf(l.status), model: agg?.lastModel ?? "unknown", effort: agg?.lastEffort,
-        contextTokens: agg?.contextTokens ?? 0, tokens: agg?.tokens ?? 0, tokensToday: agg?.tokensToday ?? 0,
+        contextTokens: agg?.contextTokens ?? 0, tokens: agg?.tokens ?? 0, tokensToday: agg?.tokensToday ?? 0, usd: agg?.usd ?? 0, usdToday: agg?.usdToday ?? 0,
         cache: agg ? { write: agg.cacheWrite, read: agg.cacheRead } : undefined, runsAs: l.agent ?? agg?.agentSetting ?? undefined,
         liveNow: agg?.lastAction && Date.now() - agg.lastAction.at < 30_000 ? agg.lastAction.text : undefined,
         skillsUsed: agg ? [...agg.skills] : [],
@@ -244,9 +318,9 @@ export class Deck {
       if (sessions.some((x) => x.id === h.id) || h.status === "idle") continue;
       const agg = t.sessions.get(h.id);
       sessions.push({
-        id: h.id, name: "headless run", source: "headless", subfolder: h.cwd && this.scope ? this.scope.subfolder(h.cwd) || undefined : undefined,
+        id: h.id, name: this.pipelineSessions.has(h.id) ? "pipeline step" : "headless run", source: this.pipelineSessions.has(h.id) ? "pipeline" : "headless", subfolder: h.cwd && this.scope ? this.scope.subfolder(h.cwd) || undefined : undefined,
         status: h.status === "stopping" || h.status === "stopped" || h.status === "waiting" ? h.status : "busy",
-        model: agg?.lastModel ?? "unknown", effort: agg?.lastEffort, contextTokens: agg?.contextTokens ?? 0, tokens: agg?.tokens ?? 0, tokensToday: agg?.tokensToday ?? 0,
+        model: agg?.lastModel ?? "unknown", effort: agg?.lastEffort, contextTokens: agg?.contextTokens ?? 0, tokens: agg?.tokens ?? 0, tokensToday: agg?.tokensToday ?? 0, usd: agg?.usd ?? 0, usdToday: agg?.usdToday ?? 0,
         cache: agg ? { write: agg.cacheWrite, read: agg.cacheRead } : undefined, runsAs: agg?.agentSetting ?? undefined,
         liveNow: agg?.lastAction && Date.now() - agg.lastAction.at < 30_000 ? agg.lastAction.text : undefined, skillsUsed: agg ? [...agg.skills] : [],
       });
@@ -265,7 +339,7 @@ export class Deck {
     for (const p of s.recentFolders) if (!suggestions.some((x) => x.path === p)) suggestions.push({ path: p, why: "Recent" });
     const base: Snapshot = {
       folder: this.scope?.folder ?? null, recentFolders: s.recentFolders, suggestions, sessions: [], agents: [], userAgents: [], mcps: [], links: [],
-      orchestratorKey: null, orchestratorPaused: false, activity: [], series: [], processes: [], history: [], formatIssues: [], inbox: [], todayTokens: 0, todayCache: { write: 0, read: 0 }, limits: s.limits,
+      orchestratorKey: null, orchestratorPaused: false, handoff: false, activity: [], series: [], processes: [], history: [], formatIssues: [], inbox: [], todayTokens: 0, todayCache: { write: 0, read: 0 }, todayUsd: 0, todayUsdByModel: {}, limits: s.limits,
       sourceRepo: "", claudeVersion: null, testedClaudeVersion: TESTED_CLAUDE_VERSION, loading: { done: false, files: 0, read: 0 },
       live: { installed: this.liveInstalled, active: this.engine.lastEventAt !== null, lastEventAt: this.engine.lastEventAt, helperReady: this.helperReady },
       agy: { ...this.agyReadiness(), models: s.geminiModels, tokensToday: 0, callsToday: 0 },
@@ -294,6 +368,7 @@ export class Deck {
       const agg = a.sameName?.usedByClaude === false ? undefined : t.agents.get(a.name);
       if (agg) {
         a.tokens = agg.tokensToday;
+        a.usdToday = agg.usdToday;
         a.calls = agg.callsToday;
         a.skillsUsed = [...agg.skills];
         const running = now - agg.lastTs < RUNNING_MS && sessions.some((x) => x.status === "busy");
@@ -321,7 +396,7 @@ export class Deck {
         key: `builtin:${type}`, name: type, kind: "builtin", scope: builtin ? "builtin" : plugin ? "plugin" : "project", file: "",
         role: builtin ? "Built-in Claude Code agent (watch only)." : plugin ? "Agent from a plugin (watch only)." : "Used here, but its file isn't in .claude/agents any more (deleted or renamed).", instructions: "",
         model: agg.lastModel ?? "unknown", effort: agg.lastEffort, toolAccess: "inherit", builtinTools: [], keepPrivate: false, checks: [],
-        status: running ? "running" : "done", parallel: running ? 1 : 0, tokens: agg.tokensToday, calls: agg.callsToday, skillsUsed: [...agg.skills],
+        status: running ? "running" : "done", parallel: running ? 1 : 0, tokens: agg.tokensToday, usdToday: agg.usdToday, calls: agg.callsToday, skillsUsed: [...agg.skills],
         liveNow: running && agg.lastAction ? { action: agg.lastAction.text, model: agg.lastModel ?? "", effort: agg.lastEffort, tokens: 0 } : undefined,
       };
       agents.push(a);
@@ -360,6 +435,7 @@ export class Deck {
       const a = x.runsAs && x.id !== "none" ? byName.get(x.runsAs) : undefined;
       if (!a || a.kind === "builtin" || a.sameName?.usedByClaude === false) continue;
       a.tokens += x.tokensToday ?? 0; // the card shows today's tokens
+      a.usdToday = (a.usdToday ?? 0) + (x.usdToday ?? 0);
       if (x.status === "busy") {
         a.status = "running";
         if (x.liveNow) a.liveNow = { action: x.liveNow, model: x.model, effort: x.effort, tokens: 0 };
@@ -481,9 +557,9 @@ export class Deck {
 
     return {
       ...base,
-      sessions, agents, userAgents, mcps: [...mcps.values()], links: [...links.values()], orchestratorKey: orchKey, orchestratorPaused: false,
+      sessions, agents, userAgents, mcps: [...mcps.values()], links: [...links.values()], orchestratorKey: orchKey, orchestratorPaused: false, handoff: this.hasHandoffCommands(),
       activity: t.recentActivity(), series, processes: this.processes, history,
-      formatIssues: issues.length && s.dismissedFormat !== signature ? issues : [], inbox: [...this.engine.items, ...this.alerts.items].sort((a, b) => b.at - a.at), todayTokens: t.todayTokens, todayCache: { ...t.todayCache },
+      formatIssues: issues.length && s.dismissedFormat !== signature ? issues : [], inbox: [...this.engine.items, ...this.alerts.items].sort((a, b) => b.at - a.at), todayTokens: t.todayTokens, todayCache: { ...t.todayCache }, todayUsd: t.todayUsd, todayUsdByModel: { ...t.todayUsdByModel },
       claudeVersion: version, loading: { ...t.progress },
       // Only looked up when the "Unknown fields" box needs it (it's in your Documents folder).
       sourceRepo: issues.length && s.dismissedFormat !== signature ? this.sourceRepoHere() : "",
@@ -519,8 +595,8 @@ export class Deck {
     if (!this.transcripts) return [];
     return [...this.transcripts.sessions.values()].filter((x) => x.firstTs).map((x) => ({
       id: x.sessionId, startedAt: x.firstTs, lastAt: x.lastTs || x.firstTs,
-      source: x.entrypoint === "claude-vscode" ? "vscode" : x.entrypoint === "sdk-cli" ? "headless" : "terminal",
-      durationMin: Math.max(1, Math.round((x.lastTs - x.firstTs) / 60_000)), tokens: x.tokens, agents: [...x.agentsUsed], mcps: [...x.mcpsUsed].map((m) => inheritedLabel(m).name),
+      source: this.pipelineSessions.has(x.sessionId) ? "pipeline" : x.entrypoint === "claude-vscode" ? "vscode" : x.entrypoint === "sdk-cli" ? "headless" : "terminal",
+      durationMin: Math.max(1, Math.round((x.lastTs - x.firstTs) / 60_000)), tokens: x.tokens, usd: x.usd, agents: [...x.agentsUsed], mcps: [...x.mcpsUsed].map((m) => inheritedLabel(m).name),
       failures: x.failures, models: [...x.models].map((m) => findModel(m)?.label ?? m),
     }));
   }

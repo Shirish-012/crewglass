@@ -41,6 +41,7 @@ function parseFile(path: string, scope: "project" | "user", displayPath: string)
     model: typeof fm.model === "string" ? fm.model : "inherit",
     effort,
     maxTurns: typeof fm.maxTurns === "number" ? fm.maxTurns : undefined,
+    ...(fm.omitClaudeMd === true ? { omitClaudeMd: true } : {}),
     toolAccess: tools ? "connected" : "inherit",
     builtinTools: (tools ?? []).filter((t) => !t.startsWith("mcp__")),
     keepPrivate: false,

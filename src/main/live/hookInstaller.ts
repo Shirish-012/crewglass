@@ -78,6 +78,12 @@ const parse = (t: string | null): Json => {
 };
 // Entries written under the old name (Agent Deck) are ours too, so they get updated or removed like the rest.
 const ours = (h: Handler) => typeof h?.command === "string" && (h.command.includes(HELPER_MARK) || h.command.includes(LEGACY.hookMark));
+/** Our status line entry: the same helper, run with --statusline. */
+const oursStatus = (s: unknown) => !!s && typeof s === "object" && ours(s as Handler) && String((s as Handler).command).includes("--statusline");
+
+/** Live mode also sets Claude Code's status line (model · context · today's spend vs your limit). Settings switch. */
+let statusLineOn = true;
+export function setStatusLine(on: boolean) { statusLineOn = on; }
 
 function withOurHooks(obj: Json, command: string): Json {
   const out: Json = structuredClone(obj);
@@ -90,6 +96,9 @@ function withOurHooks(obj: Json, command: string): Json {
     hooks[event] = cleaned;
   }
   out.hooks = hooks;
+  // Never over a status line of your own; ours is replaced or removed with the switch.
+  if (statusLineOn) { if (out.statusLine === undefined || oursStatus(out.statusLine)) out.statusLine = { type: "command", command: `${command} --statusline`, padding: 0 }; }
+  else if (oursStatus(out.statusLine)) delete out.statusLine;
   return out;
 }
 
@@ -102,6 +111,7 @@ export function refreshOurHooks(obj: Json, command: string): Json {
 
 function withoutOurHooks(obj: Json): Json {
   const out: Json = structuredClone(obj);
+  if (oursStatus(out.statusLine)) delete out.statusLine;
   if (!out.hooks || typeof out.hooks !== "object") return out;
   const hooks = out.hooks as Record<string, Entry[]>;
   for (const event of Object.keys(hooks)) {
@@ -124,6 +134,11 @@ function gitIgnored(folder: string): boolean | null {
     const status = (e as { status?: number }).status;
     return status === 1 ? false : null; // 1 = not ignored; anything else (128) = not a git repo / git missing
   }
+}
+
+/** Live mode is on here but there's no status line at all yet (it predates the feature, and you set none of your own). */
+export function missingStatusLine(folder: string): boolean {
+  try { return isInstalled(folder) && parse(readText(settingsPath(folder))).statusLine === undefined; } catch { return false; }
 }
 
 /** Live mode is on here but some of our entries run a different command (a moved helper, or the old name's). */

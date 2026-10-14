@@ -2,7 +2,7 @@
 // no file system and no way to run commands — just these functions.
 
 import { contextBridge, ipcRenderer } from "electron";
-import type { DeckApi, Snapshot } from "../shared/ipc";
+import type { DeckApi, PipelineProgress, Snapshot } from "../shared/ipc";
 
 const api: DeckApi = {
   getSnapshot: () => ipcRenderer.invoke("deck:getSnapshot"),
@@ -23,8 +23,20 @@ const api: DeckApi = {
   applySave: (planId, confirmUser, confirmChecks) => ipcRenderer.invoke("deck:applySave", planId, confirmUser, confirmChecks),
   undoLastSave: () => ipcRenderer.invoke("deck:undoLastSave"),
   refreshAgyModels: () => ipcRenderer.invoke("deck:refreshAgyModels"),
+  getSettings: () => ipcRenderer.invoke("deck:getSettings"),
+  updateSettings: (patch) => ipcRenderer.invoke("deck:updateSettings", patch),
+  chooseSourceRepo: () => ipcRenderer.invoke("deck:chooseSourceRepo"),
+  deleteAllData: () => ipcRenderer.invoke("deck:deleteAllData"),
+  testNotification: () => ipcRenderer.invoke("deck:testNotification"),
   uninstallPlan: () => ipcRenderer.invoke("deck:uninstallPlan"),
   uninstall: (opts) => ipcRenderer.invoke("deck:uninstall", opts),
+  runPipeline: (spec) => ipcRenderer.invoke("deck:runPipeline", spec),
+  stopPipeline: () => ipcRenderer.invoke("deck:stopPipeline"),
+  onPipeline: (cb) => {
+    const listener = (_e: unknown, p: PipelineProgress) => cb(p);
+    ipcRenderer.on("deck:pipeline", listener);
+    return () => ipcRenderer.removeListener("deck:pipeline", listener);
+  },
   dismissFormatIssues: () => ipcRenderer.invoke("deck:dismissFormat"),
   openInVSCode: (path) => ipcRenderer.invoke("deck:openInVSCode", path),
   onCommand: (cb) => {
