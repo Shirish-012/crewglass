@@ -1,0 +1,40 @@
+{
+  "name": "crewglass",
+  "productName": "Crewglass",
+  "version": "1.0.0",
+  "private": true,
+  "description": "See, design and safeguard your Claude Code agent team \u2014 a local-only macOS app.",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
+    "build": "electron-vite build && npm run build:hook",
+    "start": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
+    "prototype": "vite build --config vite.prototype.config.ts && open prototype/dist/index.html",
+    "prototype:build": "vite build --config vite.prototype.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build:hook": "mkdir -p out/bin && swiftc -O hook/main.swift -o out/bin/crewglass-hook && cp resources/agy-bridge/agy-bridge.mjs out/bin/agy-bridge.mjs",
+    "dist": "npm run build && env -u ELECTRON_RUN_AS_NODE electron-builder --mac --config electron-builder.yml",
+    "icon": "env -u ELECTRON_RUN_AS_NODE electron scripts/make-icon.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "@xyflow/react": "12.12.0",
+    "electron": "44.4.5",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vite-plugin-singlefile": "2.3.3",
+    "vitest": "5.0.1",
+    "yaml": "2.9.1",
+    "zustand": "5.0.15"
+  },
+  "author": "Shirish-012",
+  "license": "MIT"
+}

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output (npm run build / dist / dmg / prototype)
+out/
+release/
+prototype/dist/
+*.dmg
+
+# Local screenshots (npm run shot); the README's images live in docs/images/
+screenshots/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Claude Code's per-folder files (personal settings, handoff notes)
+.claude/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs and test output
+*.log
+npm-debug.log*
+coverage/
+*.tmp

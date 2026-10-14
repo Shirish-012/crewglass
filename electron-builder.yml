@@ -1,0 +1,46 @@
+# Crewglass.app — built and signed on your Mac (plan §11, §9). `npm run dist` → release/mac-arm64/Crewglass.app
+appId: local.crewglass.app
+productName: Crewglass
+copyright: Copyright © 2026 Shirish-012 (MIT License)
+directories:
+  output: release
+  buildResources: build
+# Use the Electron that's already in node_modules: building never downloads Electron again.
+electronDist: node_modules/electron/dist
+electronVersion: 44.4.5
+# Only the built app goes in (main, preload, UI, the hook helper and the agy bridge) — no node_modules, no sources.
+files:
+  - out/**/*
+  - "!out/**/*.map"
+  - package.json
+asar: true
+# The helper and the bridge are copied out to Crewglass's data folder at start, so they stay real files here.
+asarUnpack:
+  - out/bin/**
+npmRebuild: false
+afterPack: scripts/after-pack.cjs
+nodeGypRebuild: false
+includePdb: false
+# Electron's own risky switches, turned off in the app's binary (plan §9: "The Electron runtime is misused").
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: false   # no cookies or secrets here — and it would ask for your keychain password
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: true
+mac:
+  target:
+    - target: dir
+      arch: arm64
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  # Signed "ad hoc" on this Mac: it was never downloaded, so macOS opens it normally (no quarantine).
+  identity: "-"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSHumanReadableCopyright: Crewglass — local only
+publish: null
